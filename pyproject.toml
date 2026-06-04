@@ -7,6 +7,9 @@ readme = "README.md"
 authors = [{ name = "22B Labs" }]
 dependencies = []
 
+[project.scripts]
+kai-security = "kai_security.cli:main"
+
 [project.optional-dependencies]
 api = ["fastapi>=0.111", "uvicorn>=0.30"]
 dev = ["pytest>=8.0", "ruff>=0.5"]
@@ -14,4 +17,3 @@ dev = ["pytest>=8.0", "ruff>=0.5"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-

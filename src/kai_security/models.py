@@ -88,6 +88,18 @@ class PolicyDecision:
 
 
 @dataclass(frozen=True)
+class GatewayEvaluation:
+    request: GatewayRequest
+    detection: DetectionResult
+    decision: PolicyDecision
+    effective_prompt: str
+
+    @property
+    def prompt_changed(self) -> bool:
+        return self.effective_prompt != self.request.prompt
+
+
+@dataclass(frozen=True)
 class AuditEvent:
     event_type: str
     request_id: str
@@ -96,4 +108,3 @@ class AuditEvent:
     event_id: str = field(default_factory=lambda: str(uuid4()))
     previous_hash: str = ""
     event_hash: str = ""
-

@@ -12,7 +12,7 @@ def generate_usage_summary(events: list[AuditEvent]) -> dict[str, object]:
     actions = Counter(
         str(event.payload.get("action"))
         for event in events
-        if event.event_type in {"policy_decided", "request_finalized"}
+        if event.event_type == "policy_decided" and event.payload.get("action")
     )
     return {
         "total_events": len(events),
@@ -20,4 +20,3 @@ def generate_usage_summary(events: list[AuditEvent]) -> dict[str, object]:
         "actions": dict(actions),
         "evidence_status": "draft",
     }
-

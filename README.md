@@ -19,7 +19,7 @@ See the root development plan for the product rationale:
 ## Local Verification
 
 ```powershell
+$env:PYTHONPATH='src'
 python -m unittest discover -s tests
 python -m compileall src apps
 ```
-

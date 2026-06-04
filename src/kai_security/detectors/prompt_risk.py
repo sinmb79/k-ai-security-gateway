@@ -48,6 +48,18 @@ def detect_prompt_risk(text: str) -> DetectionResult:
                     severity="high",
                 )
             )
+    findings = _dedupe_findings(findings)
     risk_score = min(1.0, sum(0.35 for _ in findings))
     return DetectionResult(findings=tuple(findings), risk_score=risk_score, masked_text=text)
 
+
+def _dedupe_findings(findings: list[DetectionFinding]) -> list[DetectionFinding]:
+    seen: set[tuple[RiskKind, int, int, str]] = set()
+    deduped: list[DetectionFinding] = []
+    for finding in findings:
+        key = (finding.kind, finding.start, finding.end, finding.value.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(finding)
+    return deduped
