@@ -24,6 +24,34 @@ python -m unittest discover -s tests
 python -m compileall src apps
 ```
 
+## Provider Adapter Configuration
+
+The gateway route resolves by policy `ModelRoute.provider` and uses a local echo provider
+unless an endpoint is configured.
+
+Set these environment variables to enable OpenAI-compatible upstream calls:
+
+```powershell
+$env:KAI_SECURITY_EXTERNAL_OPENAI_COMPATIBLE_ENDPOINT = "https://api.openai.com"
+$env:KAI_SECURITY_EXTERNAL_OPENAI_COMPATIBLE_API_KEY = "..."
+
+$env:KAI_SECURITY_PRIVATE_LLM_ENDPOINT = "http://10.0.0.10:8080"
+$env:KAI_SECURITY_DOMESTIC_SAAS_ENDPOINT = "https://domestic-saas.internal"
+$env:KAI_SECURITY_ON_PREM_LLM_ENDPOINT = "http://onprem.internal:8080"
+```
+
+If endpoint variables are absent, all four provider names (`external-openai-compatible`,
+`private-llm`, `domestic-saas`, `on-prem-llm`) continue to use the mock/echo behavior.
+
+You can also control upstream timeout with:
+
+```powershell
+$env:KAI_SECURITY_PROVIDER_REQUEST_TIMEOUT_SECONDS = "5.0"
+```
+
+Only finite positive values are accepted; invalid, zero/negative, `nan`, and `inf`
+values fall back to `5.0` seconds.
+
 ## Approval Tokens
 
 Approval resolution through the API requires server-side approver tokens. Configure

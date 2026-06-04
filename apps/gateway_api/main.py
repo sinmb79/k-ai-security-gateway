@@ -18,9 +18,9 @@ from kai_security.model_router import choose_route
 from kai_security.models import AuditEvent, DataGrade, GatewayRequest, ModelZone, PolicyAction
 from kai_security.openai_compat import (
     build_blocked_chat_response,
-    build_gateway_chat_response,
     extract_chat_prompt,
 )
+from kai_security.providers import resolve_provider_adapter
 from kai_security.reports.generator import generate_policy_report, generate_privacy_export_check
 
 try:
@@ -67,21 +67,15 @@ def evaluate_chat_completion_payload(
 ) -> dict[str, object]:
     service = service or gateway
     model = str(payload.get("model", "gateway-mock"))
+    messages = _extract_messages(payload)
+    canonical_prompt = _extract_user_visible_prompt(messages)
     request_payload = dict(payload)
-    request_payload["prompt"] = extract_chat_prompt(payload)
+    request_payload["prompt"] = canonical_prompt
     request_payload["requested_model"] = model
     request = build_gateway_request(request_payload)
     evaluation = service.evaluate(request)
     route = choose_route(evaluation.decision, request.requested_model)
-    if evaluation.decision.action in {PolicyAction.BLOCK, PolicyAction.REQUIRE_APPROVAL}:
-        response = build_blocked_chat_response(request.request_id, evaluation.decision.reason)
-    else:
-        response = build_gateway_chat_response(
-            request.request_id,
-            evaluation.effective_prompt,
-            model=model,
-        )
-    response["gateway_security"] = {
+    gateway_security = {
         "request_id": request.request_id,
         "action": evaluation.decision.action.value,
         "policy_id": evaluation.decision.policy_id,
@@ -89,6 +83,28 @@ def evaluate_chat_completion_payload(
         "prompt_changed": evaluation.prompt_changed,
         "route": _route_payload(route),
     }
+    safe_messages = _build_safe_provider_messages(
+        action=evaluation.decision.action.value,
+        canonical_prompt=canonical_prompt,
+        effective_prompt=evaluation.effective_prompt,
+    )
+
+    if evaluation.decision.action in {PolicyAction.BLOCK, PolicyAction.REQUIRE_APPROVAL}:
+        response = build_blocked_chat_response(request.request_id, evaluation.decision.reason)
+    else:
+        if route is None:
+            raise RuntimeError("expected route for non-blocking decision")
+        adapter = resolve_provider_adapter(route)
+        response = _validate_chat_completion_response(
+            adapter.complete(
+                request_id=request.request_id,
+                model=route.model,
+                messages=safe_messages,
+                effective_prompt=evaluation.effective_prompt,
+                gateway_security=gateway_security,
+            )
+        )
+    response["gateway_security"] = gateway_security
     return response
 
 
@@ -109,6 +125,43 @@ def _route_payload(route) -> dict[str, object] | None:
     }
 
 
+def _build_safe_provider_messages(
+    *,
+    action: str,
+    canonical_prompt: str,
+    effective_prompt: str,
+) -> list[dict[str, object]]:
+    if action == "mask":
+        return [{"role": "user", "content": effective_prompt}]
+    return [{"role": "user", "content": canonical_prompt}]
+
+
+def _validate_chat_completion_response(response: object) -> dict[str, object]:
+    if not isinstance(response, dict):
+        raise RuntimeError("provider response has invalid JSON shape")
+
+    choices = response.get("choices")
+    if not isinstance(choices, list) or len(choices) == 0:
+        raise RuntimeError("provider response has invalid JSON shape")
+
+    for choice in choices:
+        if not isinstance(choice, dict):
+            raise RuntimeError("provider response has invalid JSON shape")
+
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            raise RuntimeError("provider response has invalid JSON shape")
+
+        if "tool_calls" in message or "function_call" in message:
+            raise RuntimeError("provider response has invalid JSON shape")
+
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise RuntimeError("provider response has invalid JSON shape")
+
+    return response
+
+
 def _coerce_bool(value: object) -> bool:
     if isinstance(value, bool):
         return value
@@ -119,6 +172,27 @@ def _coerce_bool(value: object) -> bool:
         if normalized in {"false", "0", "no", "n"}:
             return False
     raise ValueError(f"Invalid boolean value: {value!r}")
+
+
+def _extract_messages(payload: dict[str, object]) -> list[dict[str, object]]:
+    raw_messages = payload.get("messages")
+    if not isinstance(raw_messages, list):
+        raise ValueError("Request payload must contain a messages list.")
+    if not raw_messages:
+        raise ValueError("Request payload must contain a non-empty messages list.")
+    messages: list[dict[str, object]] = []
+    for message in raw_messages:
+        if not isinstance(message, dict):
+            raise ValueError("Each messages item must be a dict.")
+        messages.append(message)
+    return messages
+
+
+def _extract_user_visible_prompt(messages: list[dict[str, object]]) -> str:
+    user_messages = [message for message in messages if message.get("role") == "user"]
+    if not user_messages:
+        raise ValueError("Request payload must contain at least one user message.")
+    return extract_chat_prompt({"messages": user_messages})
 
 
 def _parse_approver_tokens(raw: str) -> dict[str, tuple[str, str]]:
@@ -254,6 +328,8 @@ if FastAPI is not None:
             return evaluate_chat_completion_payload(payload)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail="provider request failed") from exc
 
     @app.get("/v1/approvals/pending")
     def list_pending_approvals(authorization: str | None = Header(default=None)) -> list[dict[str, object]]:

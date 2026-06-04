@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from threading import RLock
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ class SQLiteEvidenceStore:
     """Persist audit evidence in SQLite using append-only chained hash design."""
 
     def __init__(self, database_path: str = ":memory:") -> None:
+        self._lock = RLock()
         self._conn = sqlite3.connect(database_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._ensure_schema()
@@ -23,50 +25,51 @@ class SQLiteEvidenceStore:
     def append(self, event: AuditEvent) -> AuditEvent:
         payload = deepcopy(event.payload)
 
-        with self._conn:
-            row = self._conn.execute(
-                """
-                SELECT event_hash
-                FROM evidence_events
-                ORDER BY sequence DESC
-                LIMIT 1
-                """
-            ).fetchone()
-            previous_hash = row["event_hash"] if row else ""
+        with self._lock:
+            with self._conn:
+                row = self._conn.execute(
+                    """
+                    SELECT event_hash
+                    FROM evidence_events
+                    ORDER BY sequence DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                previous_hash = row["event_hash"] if row else ""
 
-            hashed_event = replace(
-                event,
-                payload=payload,
-                previous_hash=previous_hash,
-            )
-            hashed_event = replace(
-                hashed_event,
-                event_hash=self._compute_event_hash(hashed_event),
-            )
-
-            self._conn.execute(
-                """
-                INSERT INTO evidence_events (
-                    event_id,
-                    request_id,
-                    timestamp,
-                    event_type,
-                    payload_json,
-                    previous_hash,
-                    event_hash
+                hashed_event = replace(
+                    event,
+                    payload=payload,
+                    previous_hash=previous_hash,
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    hashed_event.event_id,
-                    hashed_event.request_id,
-                    self._normalize_timestamp(hashed_event.timestamp),
-                    hashed_event.event_type,
-                    json.dumps(hashed_event.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-                    hashed_event.previous_hash,
-                    hashed_event.event_hash,
-                ),
-            )
+                hashed_event = replace(
+                    hashed_event,
+                    event_hash=self._compute_event_hash(hashed_event),
+                )
+
+                self._conn.execute(
+                    """
+                    INSERT INTO evidence_events (
+                        event_id,
+                        request_id,
+                        timestamp,
+                        event_type,
+                        payload_json,
+                        previous_hash,
+                        event_hash
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        hashed_event.event_id,
+                        hashed_event.request_id,
+                        self._normalize_timestamp(hashed_event.timestamp),
+                        hashed_event.event_type,
+                        json.dumps(hashed_event.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                        hashed_event.previous_hash,
+                        hashed_event.event_hash,
+                    ),
+                )
 
         return hashed_event
 
@@ -95,25 +98,27 @@ class SQLiteEvidenceStore:
             params = (request_id,)
         query += " ORDER BY sequence ASC"
 
-        rows = self._conn.execute(query, params).fetchall()
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
         return [self._row_to_event(row) for row in rows]
 
     def verify_chain(self) -> bool:
-        rows = self._conn.execute(
-            """
-            SELECT
-                event_id,
-                request_id,
-                timestamp,
-                event_type,
-                payload_json,
-                previous_hash,
-                event_hash,
-                sequence
-            FROM evidence_events
-            ORDER BY sequence ASC
-            """
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT
+                    event_id,
+                    request_id,
+                    timestamp,
+                    event_type,
+                    payload_json,
+                    previous_hash,
+                    event_hash,
+                    sequence
+                FROM evidence_events
+                ORDER BY sequence ASC
+                """
+            ).fetchall()
 
         expected_previous = ""
         for row in rows:
@@ -137,7 +142,8 @@ class SQLiteEvidenceStore:
         return True
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     def _ensure_schema(self) -> None:
         self._conn.execute(

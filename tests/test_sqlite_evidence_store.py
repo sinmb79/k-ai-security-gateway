@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -239,6 +240,26 @@ class SQLiteEvidenceStoreTests(unittest.TestCase):
                 )
                 self.assertEqual(len(reopened.list_events()), 3)
                 self.assertTrue(reopened.verify_chain())
+
+    def test_concurrent_append_preserves_hash_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            db_path = Path(tempdir) / "evidence.sqlite3"
+            with SQLiteEvidenceStore(str(db_path)) as store:
+                def append_event(index: int) -> None:
+                    store.append(
+                        self._make_event(
+                            event_type="request_received",
+                            request_id=f"request-{index}",
+                            timestamp=datetime(2026, 6, 5, 1, 2, index % 60, tzinfo=UTC),
+                            event_id=f"evt-{index}",
+                        )
+                    )
+
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    list(executor.map(append_event, range(40)))
+
+                self.assertEqual(len(store.list_events()), 40)
+                self.assertTrue(store.verify_chain())
 
 
 if __name__ == "__main__":
