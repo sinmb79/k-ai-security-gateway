@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from kai_security.approval.queue import InMemoryApprovalQueue
 from kai_security.detectors.pii import detect_korean_pii
 from kai_security.detectors.prompt_risk import detect_prompt_risk
 from kai_security.evidence.store import InMemoryEvidenceStore
@@ -12,8 +13,13 @@ from kai_security.policy.engine import decide_policy
 
 
 class GatewayService:
-    def __init__(self, evidence_store: InMemoryEvidenceStore | None = None) -> None:
+    def __init__(
+        self,
+        evidence_store: InMemoryEvidenceStore | None = None,
+        approval_queue: InMemoryApprovalQueue | None = None,
+    ) -> None:
         self.evidence_store = evidence_store or InMemoryEvidenceStore()
+        self.approval_queue = approval_queue or InMemoryApprovalQueue()
 
     def evaluate(self, request: GatewayRequest) -> GatewayEvaluation:
         self._record("request_received", request.request_id, {"user_id": request.user_id})
@@ -31,6 +37,7 @@ class GatewayService:
         )
         decision = decide_policy(request, combined)
         effective_prompt = _effective_prompt(request.prompt, combined, decision.action)
+        approval_id = None
         self._record(
             "policy_decided",
             request.request_id,
@@ -42,6 +49,25 @@ class GatewayService:
                 "effective_prompt_changed": effective_prompt != request.prompt,
             },
         )
+        if decision.action.value == "require_approval":
+            approval = self.approval_queue.create(
+                request_id=request.request_id,
+                requested_by=request.user_id,
+                reason=decision.reason,
+                action=decision.action.value,
+            )
+            approval_id = approval.approval_id
+            self._record(
+                "approval_requested",
+                request.request_id,
+                {
+                    "approval_id": approval.approval_id,
+                    "requested_by": approval.requested_by,
+                    "reason": approval.reason,
+                    "action": approval.action,
+                    "status": approval.status,
+                },
+            )
         self._record(
             "request_finalized",
             request.request_id,
@@ -55,6 +81,7 @@ class GatewayService:
             detection=combined,
             decision=decision,
             effective_prompt=effective_prompt,
+            approval_id=approval_id,
         )
 
     def _record(self, event_type: str, request_id: str, payload: dict[str, object]) -> None:

@@ -49,6 +49,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("decision", payload)
         self.assertIn("effective_prompt", payload)
         self.assertIn("prompt_changed", payload)
+        self.assertIn("approval_id", payload)
         self.assertIn("summary", payload)
 
 

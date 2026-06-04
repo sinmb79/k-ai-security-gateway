@@ -49,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
                     "decision": decision,
                     "effective_prompt": evaluation.effective_prompt,
                     "prompt_changed": evaluation.prompt_changed,
+                    "approval_id": evaluation.approval_id,
                     "route": route,
                     "summary": summary,
                 },

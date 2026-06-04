@@ -93,6 +93,7 @@ class GatewayEvaluation:
     detection: DetectionResult
     decision: PolicyDecision
     effective_prompt: str
+    approval_id: str | None = None
 
     @property
     def prompt_changed(self) -> bool:

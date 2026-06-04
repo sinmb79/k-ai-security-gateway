@@ -53,6 +53,10 @@ class GatewayServiceTests(unittest.TestCase):
             evaluation.decision.policy_id,
             "policy-003-data-exfiltration-external-require-approval",
         )
+        self.assertIsNotNone(evaluation.approval_id)
+        self.assertEqual(len(service.approval_queue.list_pending()), 1)
+        events = service.evidence_store.list_events(request.request_id)
+        self.assertIn("approval_requested", [event.event_type for event in events])
 
 
 if __name__ == "__main__":
