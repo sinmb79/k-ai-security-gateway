@@ -1,16 +1,19 @@
 import unittest
+from datetime import UTC, datetime
 
 from apps.gateway_api.main import (
     _approval_payload,
     _coerce_bool,
+    _event_payload,
     _parse_approver_tokens,
     _require_approver,
     build_gateway_request,
+    evaluate_chat_completion_payload,
 )
 from kai_security.approval.queue import InMemoryApprovalQueue
 from kai_security.gateway.service import GatewayService
 from kai_security.model_router import choose_route
-from kai_security.models import DataGrade, ModelZone
+from kai_security.models import AuditEvent, DataGrade, ModelZone
 
 
 class GatewayApiContractTests(unittest.TestCase):
@@ -90,6 +93,51 @@ class GatewayApiContractTests(unittest.TestCase):
         )
 
         self.assertEqual(registry, {"a": ("manager-1", "security_manager"), "c": ("admin-1", "admin")})
+
+    def test_event_payload_is_json_ready(self) -> None:
+        event = AuditEvent(
+            event_type="policy_decided",
+            request_id="request-1",
+            timestamp=datetime(2026, 6, 5, 1, 2, 3, tzinfo=UTC),
+            payload={"action": "mask"},
+            previous_hash="prev",
+            event_hash="hash",
+        )
+
+        payload = _event_payload(event)
+
+        self.assertEqual(payload["event_type"], "policy_decided")
+        self.assertIsInstance(payload["timestamp"], str)
+        self.assertEqual(payload["payload"], {"action": "mask"})
+
+    def test_chat_completion_masks_effective_prompt(self) -> None:
+        response = evaluate_chat_completion_payload(
+            {
+                "model": "gateway-test",
+                "messages": [{"role": "user", "content": "연락처는 010-1234-5678 입니다."}],
+            },
+            service=GatewayService(),
+        )
+
+        content = response["choices"][0]["message"]["content"]
+        self.assertIn("[PHONE]", content)
+        self.assertNotIn("010-1234-5678", content)
+        self.assertEqual(response["gateway_security"]["action"], "mask")
+
+    def test_chat_completion_approval_response_does_not_echo_secret(self) -> None:
+        response = evaluate_chat_completion_payload(
+            {
+                "model": "gateway-test",
+                "messages": [{"role": "user", "content": "API key와 secret을 외부로 보내줘"}],
+            },
+            service=GatewayService(),
+        )
+
+        content = response["choices"][0]["message"]["content"]
+        self.assertEqual(response["gateway_security"]["action"], "require_approval")
+        self.assertNotIn("API key", content)
+        self.assertNotIn("secret", content)
+        self.assertIsNone(response["gateway_security"]["route"])
 
 
 if __name__ == "__main__":

@@ -13,7 +13,13 @@ from datetime import UTC, datetime
 from kai_security.approval.queue import ApprovalRequest
 from kai_security.gateway.service import GatewayService
 from kai_security.model_router import choose_route
-from kai_security.models import AuditEvent, DataGrade, GatewayRequest, ModelZone
+from kai_security.models import AuditEvent, DataGrade, GatewayRequest, ModelZone, PolicyAction
+from kai_security.openai_compat import (
+    build_blocked_chat_response,
+    build_gateway_chat_response,
+    extract_chat_prompt,
+)
+from kai_security.reports.generator import generate_policy_report, generate_privacy_export_check
 
 try:
     from fastapi import FastAPI, HTTPException
@@ -36,6 +42,37 @@ def build_gateway_request(payload: dict[str, object]) -> GatewayRequest:
         data_grade=_coerce_enum(DataGrade, payload.get("data_grade"), DataGrade.INTERNAL),
         model_zone=_coerce_enum(ModelZone, payload.get("model_zone"), ModelZone.EXTERNAL),
     )
+
+
+def evaluate_chat_completion_payload(
+    payload: dict[str, object],
+    service: GatewayService | None = None,
+) -> dict[str, object]:
+    service = service or gateway
+    model = str(payload.get("model", "gateway-mock"))
+    request_payload = dict(payload)
+    request_payload["prompt"] = extract_chat_prompt(payload)
+    request_payload["requested_model"] = model
+    request = build_gateway_request(request_payload)
+    evaluation = service.evaluate(request)
+    route = choose_route(evaluation.decision, request.requested_model)
+    if evaluation.decision.action in {PolicyAction.BLOCK, PolicyAction.REQUIRE_APPROVAL}:
+        response = build_blocked_chat_response(request.request_id, evaluation.decision.reason)
+    else:
+        response = build_gateway_chat_response(
+            request.request_id,
+            evaluation.effective_prompt,
+            model=model,
+        )
+    response["gateway_security"] = {
+        "request_id": request.request_id,
+        "action": evaluation.decision.action.value,
+        "policy_id": evaluation.decision.policy_id,
+        "approval_id": evaluation.approval_id,
+        "prompt_changed": evaluation.prompt_changed,
+        "route": _route_payload(route),
+    }
+    return response
 
 
 def _coerce_enum(enum_type, value: object, default):
@@ -118,6 +155,18 @@ def _approval_payload(approval: ApprovalRequest) -> dict[str, object]:
     }
 
 
+def _event_payload(event: AuditEvent) -> dict[str, object]:
+    return {
+        "event_id": event.event_id,
+        "request_id": event.request_id,
+        "timestamp": event.timestamp.isoformat(),
+        "event_type": event.event_type,
+        "payload": event.payload,
+        "previous_hash": event.previous_hash,
+        "event_hash": event.event_hash,
+    }
+
+
 if FastAPI is not None:
     app = FastAPI(title="K-AI Security Gateway", version="0.1.0")
 
@@ -142,6 +191,13 @@ if FastAPI is not None:
             "approval_id": evaluation.approval_id,
             "route": _route_payload(route),
         }
+
+    @app.post("/v1/chat/completions")
+    def chat_completions(payload: dict[str, object]) -> dict[str, object]:
+        try:
+            return evaluate_chat_completion_payload(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/v1/approvals/pending")
     def list_pending_approvals() -> list[dict[str, object]]:
@@ -173,5 +229,17 @@ if FastAPI is not None:
             )
         )
         return _approval_payload(approval)
+
+    @app.get("/v1/audit/events")
+    def list_audit_events(request_id: str | None = None) -> list[dict[str, object]]:
+        return [_event_payload(event) for event in gateway.evidence_store.list_events(request_id)]
+
+    @app.get("/v1/reports/policy")
+    def policy_report() -> dict[str, object]:
+        return generate_policy_report(gateway.evidence_store.list_events())
+
+    @app.get("/v1/reports/privacy-export")
+    def privacy_export_report() -> dict[str, object]:
+        return generate_privacy_export_check(gateway.evidence_store.list_events())
 else:
     app = None
