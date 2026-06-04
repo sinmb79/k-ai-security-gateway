@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    container_name: kai-security-gateway
+    ports:
+      - "8765:8765"
+    environment:
+      - PYTHONPATH=/app/src
+      - KAI_SECURITY_DB_PATH=/app/data/evidence.sqlite3
+      - KAI_SECURITY_APPROVER_TOKENS=${KAI_SECURITY_APPROVER_TOKENS:?set KAI_SECURITY_APPROVER_TOKENS}
+      - KAI_SECURITY_ADMIN_TOKENS=${KAI_SECURITY_ADMIN_TOKENS:?set KAI_SECURITY_ADMIN_TOKENS}
+    volumes:
+      - kai-security-data:/app/data
+    command: ["python", "-m", "uvicorn", "apps.gateway_api.main:app", "--host", "0.0.0.0", "--port", "8765"]
+
+volumes:
+  kai-security-data:

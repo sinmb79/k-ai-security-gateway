@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 
 from kai_security.approval.queue import ApprovalRequest
+from kai_security.evidence.sqlite_store import SQLiteEvidenceStore
 from kai_security.gateway.service import GatewayService
 from kai_security.model_router import choose_route
 from kai_security.models import AuditEvent, DataGrade, GatewayRequest, ModelZone, PolicyAction
@@ -22,14 +24,29 @@ from kai_security.openai_compat import (
 from kai_security.reports.generator import generate_policy_report, generate_privacy_export_check
 
 try:
-    from fastapi import FastAPI, HTTPException
+    from fastapi import FastAPI, Header, HTTPException
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
 except ModuleNotFoundError:  # pragma: no cover - import guard for dependency-free tests
     FastAPI = None  # type: ignore[assignment]
+    Header = None  # type: ignore[assignment]
     HTTPException = None  # type: ignore[assignment]
+    FileResponse = None  # type: ignore[assignment]
+    StaticFiles = None  # type: ignore[assignment]
 
 
-gateway = GatewayService()
+def create_gateway_service() -> GatewayService:
+    db_path = os.environ.get("KAI_SECURITY_DB_PATH", "").strip()
+    if db_path:
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        return GatewayService(evidence_store=SQLiteEvidenceStore(db_path))
+    return GatewayService()
+
+
+gateway = create_gateway_service()
 _APPROVER_ROLES = {"admin", "security_manager", "approver"}
+_APP_DIR = Path(__file__).resolve().parent
+_STATIC_DIR = _APP_DIR / "static"
 
 
 def build_gateway_request(payload: dict[str, object]) -> GatewayRequest:
@@ -121,6 +138,36 @@ def _parse_approver_tokens(raw: str) -> dict[str, tuple[str, str]]:
     return registry
 
 
+def _admin_token_registry() -> dict[str, tuple[str, str]]:
+    return _parse_approver_tokens(os.environ.get("KAI_SECURITY_ADMIN_TOKENS", ""))
+
+
+def _extract_bearer_token(authorization: str | None) -> str:
+    scheme, separator, credentials = (authorization or "").partition(" ")
+    if separator and scheme.lower() == "bearer":
+        return credentials.strip()
+    return ""
+
+
+def _extract_token(token: str | None = None, authorization: str | None = None) -> str:
+    if token:
+        return token.strip()
+    if authorization:
+        return _extract_bearer_token(authorization)
+    return ""
+
+
+def _require_admin(token: str | None = None, authorization: str | None = None) -> tuple[str, str]:
+    registry = _admin_token_registry()
+    candidate = _extract_token(token=token, authorization=authorization)
+    if not candidate:
+        raise PermissionError("admin bearer token is required")
+    admin = registry.get(candidate)
+    if admin is None:
+        raise PermissionError("admin bearer token is not authorized")
+    return admin
+
+
 def _require_approver(
     payload: dict[str, object],
     token_registry: dict[str, tuple[str, str]] | None = None,
@@ -169,6 +216,15 @@ def _event_payload(event: AuditEvent) -> dict[str, object]:
 
 if FastAPI is not None:
     app = FastAPI(title="K-AI Security Gateway", version="0.1.0")
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+    @app.get("/")
+    def root() -> dict[str, str]:
+        return {"name": "K-AI Security Gateway", "admin": "/admin", "docs": "/docs"}
+
+    @app.get("/admin")
+    def admin_dashboard():
+        return FileResponse(str(_STATIC_DIR / "admin.html"))
 
     @app.post("/v1/security/evaluate")
     def evaluate(payload: dict[str, object]) -> dict[str, object]:
@@ -200,12 +256,21 @@ if FastAPI is not None:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/v1/approvals/pending")
-    def list_pending_approvals() -> list[dict[str, object]]:
+    def list_pending_approvals(authorization: str | None = Header(default=None)) -> list[dict[str, object]]:
+        try:
+            _require_admin(authorization=authorization)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         return [_approval_payload(approval) for approval in gateway.approval_queue.list_pending()]
 
     @app.post("/v1/approvals/{approval_id}/resolve")
-    def resolve_approval(approval_id: str, payload: dict[str, object]) -> dict[str, object]:
+    def resolve_approval(
+        approval_id: str,
+        payload: dict[str, object],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, object]:
         try:
+            _require_admin(authorization=authorization)
             approved = _coerce_bool(payload.get("approved", False))
             approver_id, approver_role = _require_approver(payload)
             approval = gateway.approval_queue.resolve(
@@ -231,15 +296,30 @@ if FastAPI is not None:
         return _approval_payload(approval)
 
     @app.get("/v1/audit/events")
-    def list_audit_events(request_id: str | None = None) -> list[dict[str, object]]:
+    def list_audit_events(
+        request_id: str | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> list[dict[str, object]]:
+        try:
+            _require_admin(authorization=authorization)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         return [_event_payload(event) for event in gateway.evidence_store.list_events(request_id)]
 
     @app.get("/v1/reports/policy")
-    def policy_report() -> dict[str, object]:
+    def policy_report(authorization: str | None = Header(default=None)) -> dict[str, object]:
+        try:
+            _require_admin(authorization=authorization)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         return generate_policy_report(gateway.evidence_store.list_events())
 
     @app.get("/v1/reports/privacy-export")
-    def privacy_export_report() -> dict[str, object]:
+    def privacy_export_report(authorization: str | None = Header(default=None)) -> dict[str, object]:
+        try:
+            _require_admin(authorization=authorization)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         return generate_privacy_export_check(gateway.evidence_store.list_events())
 else:
     app = None

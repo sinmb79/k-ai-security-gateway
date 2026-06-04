@@ -15,6 +15,9 @@ env/
 .env.*
 !.env.example
 .server.pid
+data/
+*.sqlite3
+artifacts/
 node_modules/
 dist/
 build/

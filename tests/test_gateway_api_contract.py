@@ -1,19 +1,30 @@
 import unittest
 from datetime import UTC, datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from apps.gateway_api.main import (
     _approval_payload,
     _coerce_bool,
     _event_payload,
+    _extract_bearer_token,
     _parse_approver_tokens,
+    _require_admin,
     _require_approver,
+    app,
     build_gateway_request,
+    create_gateway_service,
     evaluate_chat_completion_payload,
 )
 from kai_security.approval.queue import InMemoryApprovalQueue
 from kai_security.gateway.service import GatewayService
 from kai_security.model_router import choose_route
 from kai_security.models import AuditEvent, DataGrade, ModelZone
+
+try:
+    from fastapi.testclient import TestClient
+except ModuleNotFoundError:  # pragma: no cover - optional FastAPI test dependency
+    TestClient = None
 
 
 class GatewayApiContractTests(unittest.TestCase):
@@ -87,6 +98,53 @@ class GatewayApiContractTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             _require_approver({}, {"token-1": ("manager-1", "admin")})
 
+    def test_require_admin_uses_server_token_registry(self) -> None:
+        import os
+
+        old_value = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:security_manager"
+        try:
+            self.assertEqual(
+                _require_admin(authorization="Bearer admin-token"),
+                ("manager-1", "security_manager"),
+            )
+            with self.assertRaises(PermissionError):
+                _require_admin(authorization="Bearer bad-token")
+            with self.assertRaises(PermissionError):
+                _require_admin()
+        finally:
+            if old_value is None:
+                os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+            else:
+                os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_value
+
+    def test_extract_bearer_token_rejects_non_bearer_values(self) -> None:
+        self.assertEqual(_extract_bearer_token("Bearer admin-token"), "admin-token")
+        self.assertEqual(_extract_bearer_token("bearer admin-token"), "admin-token")
+        self.assertEqual(_extract_bearer_token("admin-token"), "")
+        self.assertEqual(_extract_bearer_token(None), "")
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_admin_api_uses_authorization_header_not_query_token(self) -> None:
+        import os
+
+        old_value = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:security_manager"
+        try:
+            client = TestClient(app)
+
+            self.assertEqual(client.get("/admin").status_code, 200)
+            self.assertEqual(client.get("/v1/reports/policy?admin_token=admin-token").status_code, 403)
+            self.assertEqual(
+                client.get("/v1/reports/policy", headers={"Authorization": "Bearer admin-token"}).status_code,
+                200,
+            )
+        finally:
+            if old_value is None:
+                os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+            else:
+                os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_value
+
     def test_parse_approver_tokens_ignores_invalid_roles(self) -> None:
         registry = _parse_approver_tokens(
             "a=manager-1:security_manager;b=user-1:viewer;c=admin-1:admin"
@@ -109,6 +167,30 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(payload["event_type"], "policy_decided")
         self.assertIsInstance(payload["timestamp"], str)
         self.assertEqual(payload["payload"], {"action": "mask"})
+
+    def test_create_gateway_service_uses_sqlite_when_db_path_is_set(self) -> None:
+        import os
+
+        with TemporaryDirectory() as tempdir:
+            db_path = Path(tempdir) / "audit" / "evidence.sqlite3"
+            old_value = os.environ.get("KAI_SECURITY_DB_PATH")
+            os.environ["KAI_SECURITY_DB_PATH"] = str(db_path)
+            try:
+                service = create_gateway_service()
+                service.evaluate(
+                    build_gateway_request(
+                        {"prompt": "연락처는 010-1234-5678 입니다.", "user_id": "alice"}
+                    )
+                )
+
+                self.assertTrue(db_path.exists())
+                self.assertTrue(service.evidence_store.verify_chain())
+                service.evidence_store.close()
+            finally:
+                if old_value is None:
+                    os.environ.pop("KAI_SECURITY_DB_PATH", None)
+                else:
+                    os.environ["KAI_SECURITY_DB_PATH"] = old_value
 
     def test_chat_completion_masks_effective_prompt(self) -> None:
         response = evaluate_chat_completion_payload(
