@@ -91,5 +91,9 @@ Invoke-RestMethod -Method Get `
 ```
 
 체크 항목:
-- `/v1/chat/completions`에서 민감정보 마스킹 반영 여부
+- `/v1/chat/completions`에서 계좌번호, 법인등록번호, 주소 마스킹 반영 여부
+- `/v1/policies/simulate`에서 PII finding value가 raw 값이 아닌 토큰으로 반환되는지 확인
+- `/v1/reports/evidence-package/{request_id}` 타임라인과 hash-chain 상태 확인
+- `/v1/audit/events` 필터 검색 확인
+- `/v1/audit/events/export` CSV/JSONL 다운로드와 raw PII 미포함 확인
 - `/v1/reports/policy` 응답 존재 여부 및 통계 값 확인
