@@ -763,6 +763,144 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(huge_limit.status_code, 400)
 
     @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_resolve_approval_requires_admin_bearer(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        old_approver_tokens = os.environ.get("KAI_SECURITY_APPROVER_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        os.environ["KAI_SECURITY_APPROVER_TOKENS"] = "approver-token=approver-1:security_manager"
+        service = GatewayService()
+        client = TestClient(app)
+        with patch("apps.gateway_api.main.gateway", service):
+            service.evaluate(build_gateway_request({"prompt": "API key and secret exposed", "user_id": "alice"}))
+            approval_id = service.approval_queue.list_pending()[0].approval_id
+            no_auth = client.post(
+                f"/v1/approvals/{approval_id}/resolve",
+                json={"approval_token": "approver-token", "approved": True},
+            )
+            query_token = client.post(
+                f"/v1/approvals/{approval_id}/resolve?admin_token=admin-token",
+                json={"approval_token": "approver-token", "approved": True},
+            )
+        if old_admin_tokens is None:
+            os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+        if old_approver_tokens is None:
+            os.environ.pop("KAI_SECURITY_APPROVER_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_APPROVER_TOKENS"] = old_approver_tokens
+
+        self.assertEqual(no_auth.status_code, 403)
+        self.assertEqual(query_token.status_code, 403)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_resolve_approval_invalid_approval_token_is_forbidden(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        old_approver_tokens = os.environ.get("KAI_SECURITY_APPROVER_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        os.environ["KAI_SECURITY_APPROVER_TOKENS"] = "approver-token=approver-1:security_manager"
+        service = GatewayService()
+        client = TestClient(app)
+        with patch("apps.gateway_api.main.gateway", service):
+            service.evaluate(build_gateway_request({"prompt": "API key and secret exposed", "user_id": "alice"}))
+            approval_id = service.approval_queue.list_pending()[0].approval_id
+            response = client.post(
+                f"/v1/approvals/{approval_id}/resolve",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"approval_token": "wrong-token", "approved": True},
+            )
+        if old_admin_tokens is None:
+            os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+        if old_approver_tokens is None:
+            os.environ.pop("KAI_SECURITY_APPROVER_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_APPROVER_TOKENS"] = old_approver_tokens
+
+        self.assertEqual(response.status_code, 403)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_resolve_approval_updates_pending_and_audit_events(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        old_approver_tokens = os.environ.get("KAI_SECURITY_APPROVER_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        os.environ["KAI_SECURITY_APPROVER_TOKENS"] = "approver-token=approver-1:security_manager"
+        service = GatewayService()
+        client = TestClient(app)
+        with patch("apps.gateway_api.main.gateway", service):
+            service.evaluate(build_gateway_request({"prompt": "API key and secret exposed", "user_id": "alice"}))
+            approval_id = service.approval_queue.list_pending()[0].approval_id
+            resolve_response = client.post(
+                f"/v1/approvals/{approval_id}/resolve",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"approval_token": "approver-token", "approved": True, "comment": "approved in test"},
+            )
+            pending_response = client.get(
+                "/v1/approvals/pending",
+                headers={"Authorization": "Bearer admin-token"},
+            )
+            events_response = client.get(
+                "/v1/audit/events?event_type=approval_resolved&limit=20",
+                headers={"Authorization": "Bearer admin-token"},
+            )
+        if old_admin_tokens is None:
+            os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+        if old_approver_tokens is None:
+            os.environ.pop("KAI_SECURITY_APPROVER_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_APPROVER_TOKENS"] = old_approver_tokens
+
+        self.assertEqual(resolve_response.status_code, 200)
+        self.assertEqual(resolve_response.json()["status"], "approved")
+        self.assertEqual(pending_response.status_code, 200)
+        self.assertEqual(len(pending_response.json()), 0)
+        self.assertEqual(events_response.status_code, 200)
+        events = events_response.json()
+        self.assertTrue(
+            any(
+                event.get("event_type") == "approval_resolved"
+                and event["payload"].get("approval_id") == approval_id
+                for event in events
+            )
+        )
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_resolve_approval_double_resolve_is_conflict(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        old_approver_tokens = os.environ.get("KAI_SECURITY_APPROVER_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        os.environ["KAI_SECURITY_APPROVER_TOKENS"] = "approver-token=approver-1:security_manager"
+        service = GatewayService()
+        client = TestClient(app)
+        with patch("apps.gateway_api.main.gateway", service):
+            service.evaluate(build_gateway_request({"prompt": "API key and secret exposed", "user_id": "alice"}))
+            approval_id = service.approval_queue.list_pending()[0].approval_id
+            first = client.post(
+                f"/v1/approvals/{approval_id}/resolve",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"approval_token": "approver-token", "approved": True},
+            )
+            second = client.post(
+                f"/v1/approvals/{approval_id}/resolve",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"approval_token": "approver-token", "approved": True},
+            )
+        if old_admin_tokens is None:
+            os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+        if old_approver_tokens is None:
+            os.environ.pop("KAI_SECURITY_APPROVER_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_APPROVER_TOKENS"] = old_approver_tokens
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 409)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
     def test_simulate_policy_requires_admin(self) -> None:
         client = TestClient(app)
         response = client.post(

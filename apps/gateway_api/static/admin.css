@@ -505,6 +505,94 @@ th {
   font-size: 12px;
 }
 
+.approval-controls {
+  padding: 10px 14px 0;
+  display: grid;
+  gap: 8px;
+}
+
+.approval-controls label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.approval-controls textarea,
+.approval-item-comment,
+.approval-item-actions {
+  width: 100%;
+}
+
+.approval-controls textarea,
+.approval-item-comment {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--surface);
+  color: var(--text);
+  min-width: 0;
+}
+
+.approval-controls .muted-button {
+  background: var(--surface-soft);
+  width: fit-content;
+}
+
+.approval-item-comment {
+  resize: vertical;
+}
+
+.approval-item-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.approval-item-actions button {
+  flex: 1 1 auto;
+}
+
+.approval-item-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 11px;
+  width: fit-content;
+}
+
+.status-idle,
+.approval-action-status {
+  color: var(--muted);
+}
+
+.status-processing,
+.approval-item-status.status-processing {
+  background: #fef4e2;
+  color: #8f5d00;
+}
+
+.status-success,
+.approval-item-status.status-success {
+  background: #dff5e8;
+  color: #0f7c3e;
+}
+
+.status-error,
+.approval-item-status.status-error {
+  background: #fde7e7;
+  color: #b42318;
+}
+
+.approval-action-status {
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+
 .privacy-list {
   margin: 0;
   padding: 10px 14px 14px;

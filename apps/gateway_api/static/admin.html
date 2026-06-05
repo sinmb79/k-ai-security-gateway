@@ -178,6 +178,18 @@
               <h2>승인 대기</h2>
               <span id="pendingCount">0개</span>
             </div>
+            <div class="approval-controls">
+              <label>
+                <span>승인자 토큰</span>
+                <input id="approverToken" type="password" autocomplete="off" placeholder="approver token" />
+              </label>
+              <label>
+                <span>공통 코멘트</span>
+                <textarea id="defaultApprovalComment" rows="2" placeholder="항목 공통 코멘트(선택)"></textarea>
+              </label>
+              <button type="button" id="clearApproverToken" class="muted-button">승인자 토큰 지우기</button>
+              <span id="approvalActionStatus" class="approval-action-status muted">준비됨</span>
+            </div>
             <div id="approvalList" class="approval-list"></div>
           </article>
 
