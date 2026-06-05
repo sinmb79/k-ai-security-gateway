@@ -1,92 +1,280 @@
-# K-AI Security Gateway MVP
+# K-AI Security Gateway
 
-K-AI Security Gateway is a Korean-first AI usage control and audit platform.
+[English](README.md) | [한국어](README.ko.md)
 
-The first MVP focuses on:
+K-AI Security Gateway is a Korean-first AI usage control, privacy filtering, policy
+enforcement, approval, and audit evidence gateway for organizations that want to use
+LLM services without losing control of sensitive data.
 
-- OpenAI-compatible request evaluation flow
+It is designed as a local MVP and proof-of-concept for teams that need a practical
+control point between users, AI applications, internal tools, and model providers.
+
+> Status: MVP release candidate. This repository is suitable for local evaluation,
+> architecture review, and internal proof-of-concept work. It is not yet a certified
+> production compliance product.
+
+## Why This Exists
+
+Companies do not only need an "AI blocker." They need a way to let people use AI
+while keeping sensitive records, personal data, approval duties, and audit trails
+visible.
+
+K-AI Security Gateway starts from that position:
+
+- AI usage should be observable before it becomes enforceable.
+- Sensitive Korean business data needs local language-aware detection.
+- High-risk AI requests should be routed, masked, approved, or blocked by policy.
+- Security and compliance teams need evidence packages, not only raw logs.
+- Human approval must remain explicit for actions with legal, privacy, or business risk.
+
+## Core Features
+
+- OpenAI-compatible `/v1/chat/completions` gateway
+- Provider routing for external, private, domestic SaaS, and on-prem model zones
 - Korean PII detection and masking
-- Prompt-injection and data-exfiltration risk scoring
-- Policy decisions: allow, mask, route_private, require_approval, block
-- Tamper-evident audit events
-- Evidence-backed compliance report drafts
+- Prompt-injection, data-exfiltration, and document/RAG risk detection
+- Policy engine with `allow`, `mask`, `route_private`, `require_approval`, and `block`
+- Server-side admin and approver token registry
+- Human approval queue
+- Tamper-evident audit event chain
+- SQLite-backed evidence store for local persistence
+- Request-level evidence package generation
+- Policy report and privacy report drafts
+- Model response guard for PII masking and secret blocking
+- Static admin dashboard at `/admin`
+- Audit event search and CSV/JSONL export
+- Docker Compose and PowerShell local run scripts
 
-See the root development plan for the product rationale:
+## Architecture
 
-- `K-AI-Security-Gateway-Development-Plan.md`
-- `EXECUTIVE-SUMMARY.md`
-
-## Local Verification
-
-```powershell
-$env:PYTHONPATH='src'
-python -m unittest discover -s tests
-python -m compileall src apps
+```mermaid
+flowchart LR
+    User["User or AI app"] --> Gateway["OpenAI-compatible Gateway"]
+    Gateway --> Detectors["PII, prompt risk, document risk detectors"]
+    Detectors --> Policy["Policy engine"]
+    Policy --> Decision{"Decision"}
+    Decision -->|allow or mask| Provider["Model provider adapter"]
+    Decision -->|route_private| PrivateModel["Private or on-prem model"]
+    Decision -->|require_approval| Approval["Approval queue"]
+    Decision -->|block| Blocked["Blocked response"]
+    Provider --> ResponseGuard["Response guard"]
+    PrivateModel --> ResponseGuard
+    ResponseGuard --> Gateway
+    Gateway --> Audit["Tamper-evident audit evidence store"]
+    Audit --> Reports["Evidence packages and reports"]
+    Audit --> Admin["Admin dashboard"]
+    Approval --> Admin
 ```
 
-## Provider Adapter Configuration
+## Decision Flow
 
-The gateway route resolves by policy `ModelRoute.provider` and uses a local echo provider
-unless an endpoint is configured.
+```mermaid
+sequenceDiagram
+    participant App as AI Application
+    participant GW as K-AI Gateway
+    participant D as Detectors
+    participant P as Policy Engine
+    participant Q as Approval Queue
+    participant M as Model Provider
+    participant A as Audit Store
 
-Set these environment variables to enable OpenAI-compatible upstream calls:
+    App->>GW: OpenAI-compatible chat completion request
+    GW->>D: Detect Korean PII and AI risk signals
+    D->>P: Findings and risk score
+    P-->>GW: allow, mask, route_private, require_approval, or block
+    alt require approval
+        GW->>Q: Create approval item
+        GW->>A: Append evidence event
+        GW-->>App: Approval required response
+    else allowed path
+        GW->>M: Forward masked or routed request
+        M-->>GW: Model response
+        GW->>GW: Guard response for PII and secrets
+        GW->>A: Append evidence event
+        GW-->>App: OpenAI-compatible response
+    end
+```
+
+## Repository Layout
+
+```text
+apps/gateway_api/          FastAPI app and static admin dashboard
+src/kai_security/          Core gateway, policy, detectors, evidence, reports
+policies/default.yaml      Default policy set
+docs/                      Policy, event, deployment, threat-model, MVP notes
+scripts/run-dev.ps1        Local PowerShell server launcher
+scripts/smoke-test.ps1     End-to-end smoke check script
+tests/                     Unit and API contract tests
+```
+
+## Quick Start
+
+Requirements:
+
+- Python 3.11 or newer
+- PowerShell on Windows for the helper scripts
+- Optional: Docker Desktop for Compose-based evaluation
+
+Create a virtual environment and install API dependencies:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install fastapi uvicorn pytest
+```
+
+Set local admin and approver tokens:
+
+```powershell
+$env:KAI_SECURITY_APPROVER_TOKENS = "approver-token=manager-1:security_manager"
+$env:KAI_SECURITY_ADMIN_TOKENS = "admin-token=manager-1:security_manager"
+$env:KAI_SECURITY_DB_PATH = ".\data\evidence.sqlite3"
+```
+
+Run the local server:
+
+```powershell
+./scripts/run-dev.ps1 -Port 8765
+```
+
+Open the admin dashboard:
+
+```text
+http://127.0.0.1:8765/admin
+```
+
+The dashboard uses the admin token as an `Authorization: Bearer ...` header. Do not
+put real secrets or production personal data into an MVP test environment.
+
+## Docker Compose
+
+Copy `.env.example` to `.env`, replace the placeholder tokens, then run:
+
+```powershell
+docker compose up --build
+```
+
+The API is exposed on:
+
+```text
+http://127.0.0.1:8765
+```
+
+Docker Compose stores audit evidence in the `kai-security-data` volume.
+
+## Provider Configuration
+
+The gateway uses a local echo provider unless an endpoint is configured.
 
 ```powershell
 $env:KAI_SECURITY_EXTERNAL_OPENAI_COMPATIBLE_ENDPOINT = "https://api.openai.com"
-$env:KAI_SECURITY_EXTERNAL_OPENAI_COMPATIBLE_API_KEY = "..."
+$env:KAI_SECURITY_EXTERNAL_OPENAI_COMPATIBLE_API_KEY = "replace-with-real-key-outside-git"
 
 $env:KAI_SECURITY_PRIVATE_LLM_ENDPOINT = "http://10.0.0.10:8080"
 $env:KAI_SECURITY_DOMESTIC_SAAS_ENDPOINT = "https://domestic-saas.internal"
 $env:KAI_SECURITY_ON_PREM_LLM_ENDPOINT = "http://onprem.internal:8080"
 ```
 
-If endpoint variables are absent, all four provider names (`external-openai-compatible`,
-`private-llm`, `domestic-saas`, `on-prem-llm`) continue to use the mock/echo behavior.
+Supported provider names:
 
-You can also control upstream timeout with:
+- `external-openai-compatible`
+- `private-llm`
+- `domestic-saas`
+- `on-prem-llm`
 
-```powershell
-$env:KAI_SECURITY_PROVIDER_REQUEST_TIMEOUT_SECONDS = "5.0"
-```
+If endpoint variables are absent, providers keep using the mock/echo behavior.
 
-Only finite positive values are accepted; invalid, zero/negative, `nan`, and `inf`
-values fall back to `5.0` seconds.
+## Policy Loading
 
-## Policy Set Loader
-
-Set `KAI_SECURITY_POLICY_PATH` to a JSON-compatible YAML/JSON file to load policy rules
-for the gateway process. If the value is unset or the file is missing, the default
-policy set is used. If the configured file exists but cannot be parsed or validated,
-startup fails so policy mistakes are not hidden.
-
-The repository default policy file is available at `policies/default.yaml`.
-
-Current admin endpoints:
-
-- `GET /v1/policies` returns active policy set version, source, and summaries.
-- `POST /v1/policies/simulate` runs detection + policy decision + route computation
-  without calling any model provider or approval queue.
-- `GET /v1/audit/events` searches audit events by `request_id`, `event_type`,
-  `action`, `policy_id`, timestamp range, order, and limit.
-- `GET /v1/audit/events/export?format=csv|jsonl` exports the same safe event
-  search result set. CSV cells are escaped for spreadsheet formula safety and
-  JSONL uses report-safe payload summaries instead of raw free-form payloads.
-- `GET /v1/reports/evidence-package/{request_id}` returns request-level evidence package
-  for admin users using Bearer token authentication.
-  `KAI_SECURITY_REPORT_CHAIN_VERIFY_MAX_EVENTS` controls when full hash-chain
-  verification is skipped for large stores (default: `50000`).
-
-The `/admin` dashboard can query evidence packages by `request_id` and open a
-request package directly from recent audit events.
-
-## Approval Tokens
-
-Approval resolution through the API requires server-side approver tokens. Configure
-`KAI_SECURITY_APPROVER_TOKENS` with this format:
+Set `KAI_SECURITY_POLICY_PATH` to a JSON-compatible YAML/JSON policy file:
 
 ```powershell
-$env:KAI_SECURITY_APPROVER_TOKENS='token-1=manager-1:security_manager;token-2=admin-1:admin'
+$env:KAI_SECURITY_POLICY_PATH = "policies/default.yaml"
 ```
 
-Allowed roles are `admin`, `security_manager`, and `approver`. The API does not
-trust `approver_id` or `approver_role` from the request body.
+If the variable is unset or the file is missing, the built-in default policy set is
+used. If the configured file exists but cannot be parsed or validated, startup fails
+so policy mistakes are not hidden.
+
+Useful endpoints:
+
+- `GET /v1/policies`
+- `POST /v1/policies/simulate`
+- `GET /v1/audit/events`
+- `GET /v1/audit/events/export?format=csv|jsonl`
+- `GET /v1/reports/policy`
+- `GET /v1/reports/evidence-package/{request_id}`
+
+## Verification
+
+Run from the repository root:
+
+```powershell
+$env:PYTHONPATH='src'
+python -m unittest discover -s tests
+python -m compileall src apps
+node --check apps\gateway_api\static\admin.js
+docker compose --env-file .env.example config --quiet
+```
+
+With a server running:
+
+```powershell
+./scripts/smoke-test.ps1 -BaseUrl "http://127.0.0.1:8765" -AdminToken "admin-token-1"
+```
+
+The smoke script checks masking, policy simulation, evidence package generation,
+audit event search, and CSV/JSONL export behavior.
+
+## Security and Privacy Notes
+
+- Do not commit real provider keys, admin tokens, approver tokens, audit databases,
+  raw prompts, or customer data.
+- `.env`, `.env.*`, `data/`, SQLite files, logs, generated artifacts, and worktrees
+  are ignored by default.
+- `.env.example` contains placeholders only.
+- Admin and approver APIs are token-gated, but production deployments should add
+  proper identity, SSO/OIDC, network controls, TLS, key rotation, and retention policy.
+- Evidence reports are designed for review support. They are not legal advice or a
+  substitute for a formal audit.
+
+See [SECURITY.md](SECURITY.md) for reporting and handling guidance.
+
+## Known MVP Boundaries
+
+- Streaming chat completion pass-through is not implemented yet.
+- Production SSO/RBAC integration is not implemented yet.
+- Very large audit exports need cursor-based pagination.
+- Policy editing/version publishing in the dashboard is not complete.
+- Encrypted raw-prompt vault separation and retention enforcement are future hardening
+  items.
+- PII detection is Korean-first and rule-based. It should be extended with
+  organization-specific patterns before production use.
+
+## Roadmap
+
+1. Gateway hardening: streaming support, provider retry budgets, production auth,
+   retention controls, and encrypted evidence separation.
+2. Agent Firewall and Tool Broker: tool allowlists, least privilege, temporary
+   permissions, and human approval for high-risk tool calls.
+3. AI SOC Agent: incident timeline, alert explanation, MITRE ATT&CK/ATLAS mapping,
+   and response playbook drafts.
+4. AI Compliance Agent: evidence collection and report drafts for Korea AI Act,
+   privacy law, ISMS-P, CSAP, N2SF-style controls, and internal AI governance.
+
+## Documentation
+
+- [Korean README](README.ko.md)
+- [MVP release candidate status](docs/mvp-release-candidate.md)
+- [Deployment guide](docs/deployment.md)
+- [Policy specification](docs/policy-spec.md)
+- [Event schema](docs/event-schema.md)
+- [Threat model](docs/threat-model.md)
+- [SQLite evidence store](docs/sqlite-store.md)
+- [Development plan](K-AI-Security-Gateway-Development-Plan.md)
+
+## License
+
+No open-source license has been added yet. Until a license is selected, the default
+copyright rules apply. Add a license before inviting external reuse or contribution.
