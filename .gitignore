@@ -11,6 +11,7 @@ env/
 *.pyo
 *.pyd
 *.log
+.server.err
 .env
 .env.*
 !.env.example
