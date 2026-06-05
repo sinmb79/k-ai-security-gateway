@@ -59,6 +59,9 @@ class InMemoryEvidenceStore:
             events = events[:limit]
         return [replace(event, payload=deepcopy(event.payload)) for event in events]
 
+    def count_events(self) -> int:
+        return len(self._events)
+
     def verify_chain(self) -> bool:
         for i, event in enumerate(self._events):
             expected_previous = "" if i == 0 else self._events[i - 1].event_hash

@@ -84,3 +84,29 @@ must describe the decision reason in human-readable text.
 
 Events are appended in order. Each event hash is computed from the previous hash and
 canonical JSON of the current event payload.
+
+## Request Evidence Package Report
+
+`GET /v1/reports/evidence-package/{request_id}` builds a request-level evidence
+package for admin users. The report includes:
+
+- request id, event count, event types, and hash-chain verification status
+- `chain_verification.status`: `verified`, `failed`, or `skipped`
+- timeline entries with `event_id`, `timestamp`, `event_type`, `event_hash`,
+  `previous_hash`, and a safe payload summary
+- latest policy decision and route decision
+- approval request/resolution summary when applicable
+- evidence status: `missing_evidence`, `incomplete`, or `complete`
+- missing required event types
+
+Required request events are `request_received`, `request_analyzed`,
+`policy_decided`, `model_routed`, and `request_finalized`.
+
+The report intentionally exposes only metadata needed for audit reconstruction.
+Raw prompts, raw model responses, and free-form approval comments are not included
+in the package.
+
+Full hash-chain verification is capped by
+`KAI_SECURITY_REPORT_CHAIN_VERIFY_MAX_EVENTS` (default: `50000`). When the store
+exceeds this threshold, `chain_verified` is `null` and `chain_verification.status`
+is `skipped` so the admin API cannot become an unbounded verification endpoint.

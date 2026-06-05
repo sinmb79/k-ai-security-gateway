@@ -3,8 +3,54 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import Any
 
 from kai_security.models import AuditEvent
+
+
+_REQUIRED_REQUEST_EVENT_TYPES = (
+    "request_received",
+    "request_analyzed",
+    "policy_decided",
+    "model_routed",
+    "request_finalized",
+)
+_SAFE_TIMELINE_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
+    "request_received": ("user_id",),
+    "request_analyzed": ("risk_score", "finding_count", "findings"),
+    "policy_decided": (
+        "action",
+        "reason",
+        "policy_id",
+        "policy_version",
+        "policy_source",
+        "policy_set_version",
+        "effective_prompt_changed",
+    ),
+    "model_routed": (
+        "action",
+        "policy_id",
+        "policy_version",
+        "requested_model",
+        "effective_prompt_changed",
+        "route",
+        "reason",
+    ),
+    "approval_requested": ("approval_id", "requested_by", "reason", "action", "status"),
+    "approval_resolved": (
+        "approval_id",
+        "request_id",
+        "requested_by",
+        "reason",
+        "action",
+        "status",
+        "created_at",
+        "resolved_by",
+        "resolved_at",
+        "approver_role",
+    ),
+    "request_finalized": ("action", "effective_prompt_changed"),
+}
 
 
 def generate_usage_summary(events: list[AuditEvent]) -> dict[str, object]:
@@ -19,6 +65,114 @@ def generate_usage_summary(events: list[AuditEvent]) -> dict[str, object]:
         "events_by_type": dict(by_type),
         "actions": dict(actions),
         "evidence_status": "draft",
+    }
+
+
+def _find_last_event(events: list[AuditEvent], event_type: str) -> AuditEvent | None:
+    for event in reversed(events):
+        if event.event_type == event_type:
+            return event
+    return None
+
+
+def _event_payload_summary(event: AuditEvent) -> dict[str, object]:
+    return {
+        "event_id": event.event_id,
+        "timestamp": event.timestamp.isoformat(),
+        "event_type": event.event_type,
+        "event_hash": event.event_hash,
+        "previous_hash": event.previous_hash,
+        "payload": _safe_timeline_payload(event),
+    }
+
+
+def _safe_timeline_payload(event: AuditEvent) -> dict[str, object]:
+    allowed_keys = _SAFE_TIMELINE_PAYLOAD_KEYS.get(event.event_type, ())
+    return {key: event.payload[key] for key in allowed_keys if key in event.payload}
+
+
+def _approval_summary(
+    events: list[AuditEvent],
+    *,
+    missing_status: str,
+) -> dict[str, object] | None:
+    if not events:
+        return {"status": missing_status, "count": 0}
+    last_event = events[-1]
+    payload: dict[str, object] = {
+        "status": str(last_event.payload.get("status")),
+        "count": len(events),
+    }
+    if "approval_id" in last_event.payload:
+        payload["approval_id"] = last_event.payload.get("approval_id")
+    if "requested_by" in last_event.payload:
+        payload["requested_by"] = last_event.payload.get("requested_by")
+    if "resolved_by" in last_event.payload:
+        payload["resolved_by"] = last_event.payload.get("resolved_by")
+    if "reason" in last_event.payload:
+        payload["reason"] = last_event.payload.get("reason")
+    if "action" in last_event.payload:
+        payload["action"] = last_event.payload.get("action")
+    if last_event.payload.get("status") in {"approved", "rejected", "pending"}:
+        payload["status"] = str(last_event.payload.get("status"))
+    return payload
+
+
+def generate_request_evidence_package(
+    events: list[AuditEvent],
+    request_id: str,
+    chain_verified: bool | None = None,
+) -> dict[str, object]:
+    """Build a request-centric evidence package from tamper-evident event metadata only."""
+    request_events = [event for event in events if event.request_id == request_id]
+    event_types = [event.event_type for event in request_events]
+    event_type_set = sorted(set(event_types))
+    missing_event_types = [event_type for event_type in _REQUIRED_REQUEST_EVENT_TYPES if event_type not in event_type_set]
+    if not request_events:
+        evidence_status = "missing_evidence"
+    elif missing_event_types:
+        evidence_status = "incomplete"
+    else:
+        evidence_status = "complete"
+
+    policy_event = _find_last_event(request_events, "policy_decided")
+    route_event = _find_last_event(request_events, "model_routed")
+    approval_requested_events = [event for event in request_events if event.event_type == "approval_requested"]
+    approval_resolved_events = [event for event in request_events if event.event_type == "approval_resolved"]
+
+    if policy_event is None:
+        policy_decision: dict[str, Any] | None = None
+    else:
+        policy_payload = policy_event.payload
+        policy_decision = {
+            "action": policy_payload.get("action"),
+            "reason": policy_payload.get("reason"),
+            "policy_id": policy_payload.get("policy_id"),
+            "policy_version": policy_payload.get("policy_version"),
+            "policy_source": policy_payload.get("policy_source"),
+        }
+        if "policy_set_version" in policy_payload:
+            policy_decision["policy_set_version"] = policy_payload.get("policy_set_version")
+
+    return {
+        "report_type": "request_evidence_package",
+        "request_id": request_id,
+        "event_count": len(request_events),
+        "event_types": event_type_set,
+        "chain_verified": chain_verified,
+        "timeline": [_event_payload_summary(event) for event in request_events],
+        "policy_decision": policy_decision,
+        "route_decision": _safe_timeline_payload(route_event) if route_event is not None else None,
+        "approval": {
+            "approval_requested": _approval_summary(
+                approval_requested_events, missing_status="not_requested"
+            ),
+            "approval_resolved": _approval_summary(
+                approval_resolved_events, missing_status="not_resolved"
+            ),
+        },
+        "evidence_status": evidence_status,
+        "missing_event_types": missing_event_types,
     }
 
 

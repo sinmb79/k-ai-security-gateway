@@ -22,7 +22,11 @@ from kai_security.openai_compat import (
     extract_chat_prompt,
 )
 from kai_security.providers import resolve_provider_adapter
-from kai_security.reports.generator import generate_policy_report, generate_privacy_export_check
+from kai_security.reports.generator import (
+    generate_policy_report,
+    generate_privacy_export_check,
+    generate_request_evidence_package,
+)
 
 try:
     from fastapi import FastAPI, Header, HTTPException
@@ -51,6 +55,7 @@ def create_gateway_service() -> GatewayService:
 gateway = create_gateway_service()
 _APPROVER_ROLES = {"admin", "security_manager", "approver"}
 _MAX_AUDIT_EVENT_LIMIT = 1000
+_DEFAULT_CHAIN_VERIFY_MAX_EVENTS = 50000
 _APP_DIR = Path(__file__).resolve().parent
 _STATIC_DIR = _APP_DIR / "static"
 
@@ -363,6 +368,47 @@ def _event_payload(event: AuditEvent) -> dict[str, object]:
     }
 
 
+def _report_chain_verify_max_events() -> int:
+    raw = os.environ.get(
+        "KAI_SECURITY_REPORT_CHAIN_VERIFY_MAX_EVENTS",
+        str(_DEFAULT_CHAIN_VERIFY_MAX_EVENTS),
+    ).strip()
+    if not raw:
+        return _DEFAULT_CHAIN_VERIFY_MAX_EVENTS
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_CHAIN_VERIFY_MAX_EVENTS
+    return max(0, value)
+
+
+def _count_evidence_events(evidence_store: object) -> int:
+    count_events = getattr(evidence_store, "count_events", None)
+    if callable(count_events):
+        return int(count_events())
+    list_events = getattr(evidence_store, "list_events")
+    return len(list_events())
+
+
+def _chain_verification_report(evidence_store: object) -> tuple[bool | None, dict[str, object]]:
+    event_count = _count_evidence_events(evidence_store)
+    max_event_count = _report_chain_verify_max_events()
+    if event_count > max_event_count:
+        return None, {
+            "status": "skipped",
+            "event_count": event_count,
+            "max_event_count": max_event_count,
+            "reason": "chain verification skipped because event count exceeds configured report limit",
+        }
+
+    verified = bool(evidence_store.verify_chain())
+    return verified, {
+        "status": "verified" if verified else "failed",
+        "event_count": event_count,
+        "max_event_count": max_event_count,
+    }
+
+
 if FastAPI is not None:
     app = FastAPI(title="K-AI Security Gateway", version="0.1.0")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -510,5 +556,29 @@ if FastAPI is not None:
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         return generate_privacy_export_check(gateway.evidence_store.list_events())
+
+    @app.get("/v1/reports/evidence-package/{request_id}")
+    def request_evidence_package_report(
+        request_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, object]:
+        try:
+            _require_admin(authorization=authorization)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        events = gateway.evidence_store.list_events(request_id=request_id)
+        if not events:
+            raise HTTPException(
+                status_code=404,
+                detail=f"request_id not found: {request_id}",
+            )
+        chain_verified, chain_verification = _chain_verification_report(gateway.evidence_store)
+        report = generate_request_evidence_package(
+            events,
+            request_id=request_id,
+            chain_verified=chain_verified,
+        )
+        report["chain_verification"] = chain_verification
+        return report
 else:
     app = None

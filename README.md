@@ -66,6 +66,10 @@ Current admin endpoints:
 - `GET /v1/policies` returns active policy set version, source, and summaries.
 - `POST /v1/policies/simulate` runs detection + policy decision + route computation
   without calling any model provider or approval queue.
+- `GET /v1/reports/evidence-package/{request_id}` returns request-level evidence package
+  for admin users using Bearer token authentication.
+  `KAI_SECURITY_REPORT_CHAIN_VERIFY_MAX_EVENTS` controls when full hash-chain
+  verification is skipped for large stores (default: `50000`).
 
 ## Approval Tokens
 

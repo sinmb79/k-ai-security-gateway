@@ -58,6 +58,7 @@ class EvidenceStoreTests(unittest.TestCase):
 
         all_events = store.list_events()
         self.assertEqual(len(all_events), 2)
+        self.assertEqual(store.count_events(), 2)
 
     def test_list_events_returns_copy(self) -> None:
         store = InMemoryEvidenceStore()

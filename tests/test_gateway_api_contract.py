@@ -1,6 +1,7 @@
 import json
 import unittest
 import os
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -940,6 +941,147 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertIn("route", result)
         self.assertEqual(len(service.approval_queue.list_pending()), 0)
         self.assertEqual(len(service.evidence_store.list_events()), 0)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_evidence_package_report_requires_admin_bearer(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        client = TestClient(app)
+        service = GatewayService()
+        request = build_gateway_request(
+            {"prompt": "API key and secret exposed", "user_id": "alice"}
+        )
+        service.evaluate(request)
+        with patch("apps.gateway_api.main.gateway", service):
+            no_auth = client.get(f"/v1/reports/evidence-package/{request.request_id}")
+            query_token = client.get(
+                f"/v1/reports/evidence-package/{request.request_id}?admin_token=admin-token",
+            )
+
+        if old_admin_tokens is None:
+            os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+
+        self.assertEqual(no_auth.status_code, 403)
+        self.assertEqual(query_token.status_code, 403)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_evidence_package_report_returns_package_for_existing_request(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        client = TestClient(app)
+        service = GatewayService()
+        request = build_gateway_request(
+            {"prompt": "API key and secret exposed", "user_id": "alice"}
+        )
+        service.evaluate(request)
+        with patch("apps.gateway_api.main.gateway", service):
+            response = client.get(
+                f"/v1/reports/evidence-package/{request.request_id}",
+                headers={"Authorization": "Bearer admin-token"},
+            )
+
+        if old_admin_tokens is None:
+            os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["report_type"], "request_evidence_package")
+        self.assertEqual(payload["request_id"], request.request_id)
+        self.assertEqual(payload["chain_verified"], True)
+        self.assertEqual(payload["policy_decision"]["policy_version"], "0.1.0")
+        self.assertTrue(all(isinstance(item.get("event_hash"), str) for item in payload["timeline"]))
+        self.assertEqual(payload["approval"]["approval_requested"]["count"], 1)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_evidence_package_report_exposes_failed_chain_verification(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        old_chain_max = os.environ.get("KAI_SECURITY_REPORT_CHAIN_VERIFY_MAX_EVENTS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        os.environ["KAI_SECURITY_REPORT_CHAIN_VERIFY_MAX_EVENTS"] = "50000"
+        client = TestClient(app)
+        service = GatewayService()
+        request = build_gateway_request(
+            {"prompt": "API key and secret exposed", "user_id": "alice"}
+        )
+        service.evaluate(request)
+        service.evidence_store._events[0] = replace(
+            service.evidence_store._events[0],
+            payload={"user_id": "tampered"},
+        )
+        with patch("apps.gateway_api.main.gateway", service):
+            response = client.get(
+                f"/v1/reports/evidence-package/{request.request_id}",
+                headers={"Authorization": "Bearer admin-token"},
+            )
+
+        if old_admin_tokens is None:
+            os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+        if old_chain_max is None:
+            os.environ.pop("KAI_SECURITY_REPORT_CHAIN_VERIFY_MAX_EVENTS", None)
+        else:
+            os.environ["KAI_SECURITY_REPORT_CHAIN_VERIFY_MAX_EVENTS"] = old_chain_max
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["chain_verified"], False)
+        self.assertEqual(payload["chain_verification"]["status"], "failed")
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_evidence_package_report_can_skip_chain_verification_above_limit(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        old_chain_max = os.environ.get("KAI_SECURITY_REPORT_CHAIN_VERIFY_MAX_EVENTS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        os.environ["KAI_SECURITY_REPORT_CHAIN_VERIFY_MAX_EVENTS"] = "0"
+        client = TestClient(app)
+        service = GatewayService()
+        request = build_gateway_request(
+            {"prompt": "API key and secret exposed", "user_id": "alice"}
+        )
+        service.evaluate(request)
+        with patch("apps.gateway_api.main.gateway", service):
+            response = client.get(
+                f"/v1/reports/evidence-package/{request.request_id}",
+                headers={"Authorization": "Bearer admin-token"},
+            )
+
+        if old_admin_tokens is None:
+            os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+        if old_chain_max is None:
+            os.environ.pop("KAI_SECURITY_REPORT_CHAIN_VERIFY_MAX_EVENTS", None)
+        else:
+            os.environ["KAI_SECURITY_REPORT_CHAIN_VERIFY_MAX_EVENTS"] = old_chain_max
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIsNone(payload["chain_verified"])
+        self.assertEqual(payload["chain_verification"]["status"], "skipped")
+        self.assertEqual(payload["chain_verification"]["max_event_count"], 0)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_evidence_package_report_for_unknown_request_returns_404(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        client = TestClient(app)
+
+        response = client.get(
+            "/v1/reports/evidence-package/does-not-exist",
+            headers={"Authorization": "Bearer admin-token"},
+        )
+
+        if old_admin_tokens is None:
+            os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+
+        self.assertEqual(response.status_code, 404)
 
 
 if __name__ == "__main__":

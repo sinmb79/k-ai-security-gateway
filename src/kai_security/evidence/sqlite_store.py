@@ -118,6 +118,11 @@ class SQLiteEvidenceStore:
             rows = self._conn.execute(query, tuple(params)).fetchall()
         return [self._row_to_event(row) for row in rows]
 
+    def count_events(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) AS event_count FROM evidence_events").fetchone()
+        return int(row["event_count"])
+
     def verify_chain(self) -> bool:
         with self._lock:
             rows = self._conn.execute(

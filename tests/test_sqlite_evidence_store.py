@@ -233,6 +233,7 @@ class SQLiteEvidenceStoreTests(unittest.TestCase):
             with SQLiteEvidenceStore(str(db_path)) as reopened:
                 self.assertTrue(reopened.verify_chain())
                 self.assertEqual(len(reopened.list_events()), 2)
+                self.assertEqual(reopened.count_events(), 2)
                 reopened.append(
                     self._make_event(
                         event_type="request_finalized",
