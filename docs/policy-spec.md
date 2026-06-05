@@ -29,6 +29,7 @@ Supported `when` keys:
 - `data_grade`: `public|internal|confidential|restricted`
 - `model_zone`: `external|domestic_saas|private|on_prem`
 - `finding_kinds_any`: list of finding kinds
+- `finding_kinds_none`: list of finding kinds that must be absent
 - `min_risk_score`: minimum score threshold (number)
 - `no_findings`: boolean
 

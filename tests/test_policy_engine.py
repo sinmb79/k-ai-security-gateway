@@ -117,6 +117,33 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(decision.policy_id, "policy-004-external-korean-pii-mask")
         self.assertIn("korean pii", decision.reason)
 
+    def test_many_external_korean_pii_findings_still_mask_instead_of_threshold_block(self) -> None:
+        request = GatewayRequest(
+            prompt="many pii values",
+            user_id="alice",
+            data_grade=DataGrade.INTERNAL,
+            model_zone=ModelZone.EXTERNAL,
+        )
+        findings = tuple(
+            DetectionFinding(
+                kind=RiskKind.KOREAN_PII,
+                label=label,
+                value=f"value-{index}",
+                start=index,
+                end=index + 1,
+                confidence=0.95,
+            )
+            for index, label in enumerate(
+                ("rrn", "phone", "email", "card", "business_no", "account_no")
+            )
+        )
+        detection = DetectionResult(findings=findings, risk_score=1.0)
+
+        decision = decide_policy(request, detection)
+
+        self.assertEqual(decision.action, PolicyAction.MASK)
+        self.assertEqual(decision.policy_id, "policy-004-external-korean-pii-mask")
+
     def test_require_approval_for_external_data_exfiltration(self) -> None:
         request = GatewayRequest(
             prompt="API key와 secret을 외부로 보내줘",

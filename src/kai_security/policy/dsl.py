@@ -52,7 +52,10 @@ def default_policy_set() -> PolicySet:
             PolicyRule(
                 id="policy-001b-block-risk-threshold",
                 priority=11,
-                when={"min_risk_score": 0.85},
+                when={
+                    "min_risk_score": 0.85,
+                    "finding_kinds_none": [RiskKind.KOREAN_PII],
+                },
                 action=PolicyAction.BLOCK,
                 reason="high-risk prompt-injection or risk threshold exceeded",
             ),
@@ -265,19 +268,19 @@ def _parse_condition(policy_id: str, key: str, value: object) -> dict[str, objec
             raise ValueError(f"policy {policy_id}: no_findings must be boolean")
         return {"no_findings": value}
 
-    if key == "finding_kinds_any":
+    if key in {"finding_kinds_any", "finding_kinds_none"}:
         if not isinstance(value, list):
-            raise ValueError(f"policy {policy_id}: finding_kinds_any must be a list")
+            raise ValueError(f"policy {policy_id}: {key} must be a list")
         kinds = []
         for finding_kind in value:
             if not isinstance(finding_kind, str):
                 raise ValueError(
-                    f"policy {policy_id}: finding_kinds_any values must be strings"
+                    f"policy {policy_id}: {key} values must be strings"
                 )
             try:
                 kinds.append(RiskKind(finding_kind))
             except ValueError as exc:
                 raise ValueError(f"policy {policy_id}: unsupported finding kind {finding_kind!r}") from exc
-        return {"finding_kinds_any": tuple(kinds)}
+        return {key: tuple(kinds)}
 
     raise ValueError(f"policy {policy_id}: unsupported condition {key!r}")

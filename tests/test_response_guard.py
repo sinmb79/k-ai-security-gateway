@@ -12,6 +12,14 @@ class ResponseGuardTests(unittest.TestCase):
         self.assertIn("[PHONE]", result.content)
         self.assertNotIn("010-1234-5678", result.content)
 
+    def test_masks_account_response(self) -> None:
+        result = guard_response_text("입금계좌 110-123-456789 로 보내면 됩니다.")
+
+        self.assertEqual(result.action, "mask")
+        self.assertTrue(result.response_changed)
+        self.assertIn("[ACCOUNT_NO]", result.content)
+        self.assertNotIn("110-123-456789", result.content)
+
     def test_blocks_secret_response(self) -> None:
         result = guard_response_text(
             "API key: sk-1234567890abcdef and password=supersecret1"

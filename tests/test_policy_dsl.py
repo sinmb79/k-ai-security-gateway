@@ -90,6 +90,33 @@ class PolicyDslLoaderTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_policy_set_from_path(policy_path)
 
+    def test_finding_kinds_none_condition_is_loaded(self) -> None:
+        payload = {
+            "version": "0.2.0",
+            "policies": [
+                {
+                    "id": "policy-no-pii-threshold",
+                    "priority": 10,
+                    "when": {
+                        "min_risk_score": 0.85,
+                        "finding_kinds_none": ["korean_pii"],
+                    },
+                    "action": "block",
+                    "reason": "high risk without pii",
+                }
+            ],
+        }
+
+        with TemporaryDirectory() as tempdir:
+            policy_path = Path(tempdir) / "policy.json"
+            policy_path.write_text(json.dumps(payload), encoding="utf-8")
+            policy_set = load_policy_set(str(policy_path))
+
+        self.assertEqual(
+            policy_set.policies[0].when["finding_kinds_none"],
+            (RiskKind.KOREAN_PII,),
+        )
+
     def test_repo_default_policy_file_preserves_built_in_rule_coverage(self) -> None:
         policy_path = Path(__file__).resolve().parents[1] / "policies" / "default.yaml"
         policy_set = load_policy_set_from_path(policy_path)

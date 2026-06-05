@@ -17,10 +17,11 @@ from enum import Enum
 from copy import deepcopy
 
 from kai_security.approval.queue import ApprovalRequest
+from kai_security.detectors.pii import mask_token_for_label
 from kai_security.evidence.sqlite_store import SQLiteEvidenceStore
 from kai_security.gateway.service import GatewayService
 from kai_security.model_router import choose_route
-from kai_security.models import AuditEvent, DataGrade, GatewayRequest, ModelZone, PolicyAction
+from kai_security.models import AuditEvent, DataGrade, GatewayRequest, ModelZone, PolicyAction, RiskKind
 from kai_security.openai_compat import (
     build_blocked_chat_response,
     extract_chat_prompt,
@@ -155,7 +156,7 @@ def evaluate_policy_simulation_payload(
         {
             "kind": finding.kind.value,
             "label": finding.label,
-            "value": finding.value,
+            "value": _safe_finding_value(finding),
             "start": finding.start,
             "end": finding.end,
             "confidence": finding.confidence,
@@ -174,6 +175,12 @@ def evaluate_policy_simulation_payload(
         "finding_count": len(detection.findings),
         "findings": findings,
     }
+
+
+def _safe_finding_value(finding) -> str:
+    if getattr(finding, "kind", None) == RiskKind.KOREAN_PII:
+        return mask_token_for_label(finding.label)
+    return str(finding.value)
 
 
 def _coerce_enum(enum_type, value: object, default):

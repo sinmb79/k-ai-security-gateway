@@ -116,6 +116,13 @@ def _matches_condition(
         else:
             return False
         return any(_has_finding_of_kind(detection.findings, kind) for kind in kinds)
+    if condition_key == "finding_kinds_none":
+        none_kinds: Iterable[RiskKind]
+        if isinstance(expected, (list, tuple)):
+            none_kinds = tuple(k for k in expected if isinstance(k, RiskKind))
+        else:
+            return False
+        return not any(_has_finding_of_kind(detection.findings, kind) for kind in none_kinds)
     if condition_key == "min_risk_score":
         if isinstance(expected, int | float):
             return detection.risk_score >= float(expected)

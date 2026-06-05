@@ -1241,6 +1241,37 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(len(service.evidence_store.list_events()), 0)
 
     @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_policy_simulate_endpoint_masks_pii_finding_values(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        client = TestClient(app)
+        service = GatewayService()
+        with patch("apps.gateway_api.main.gateway", service):
+            response = client.post(
+                "/v1/policies/simulate",
+                headers={"Authorization": "Bearer admin-token"},
+                json={
+                    "prompt": "입금계좌 110-123-456789, 법인등록번호 123456-1234567, 서울특별시 강남구 테헤란로 123 확인",
+                    "data_grade": "internal",
+                    "model_zone": "external",
+                    "user_id": "alice",
+                },
+            )
+        if old_admin_tokens is None:
+            os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+
+        self.assertEqual(response.status_code, 200)
+        rendered = json.dumps(response.json(), ensure_ascii=False)
+        self.assertIn("[ACCOUNT_NO]", rendered)
+        self.assertIn("[CORP_REG_NO]", rendered)
+        self.assertIn("[ADDRESS]", rendered)
+        self.assertNotIn("110-123-456789", rendered)
+        self.assertNotIn("123456-1234567", rendered)
+        self.assertNotIn("서울특별시 강남구 테헤란로", rendered)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
     def test_evidence_package_report_requires_admin_bearer(self) -> None:
         old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
         os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"

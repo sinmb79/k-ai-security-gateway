@@ -58,24 +58,65 @@ class KoreanPiiDetectorTests(unittest.TestCase):
         ranges = [(finding.start, finding.end) for finding in result.findings]
         self.assertEqual(len(ranges), len(set(ranges)))
 
+    def test_detects_account_corporate_registration_and_address(self) -> None:
+        prompt = (
+            "입금계좌 110-123-456789, "
+            "법인등록번호 123456-1234567, "
+            "주소는 서울특별시 강남구 테헤란로 123 입니다."
+        )
+
+        result = detect_korean_pii(prompt)
+
+        labels = {finding.label for finding in result.findings}
+        self.assertIn("account_no", labels)
+        self.assertIn("corporate_registration_no", labels)
+        self.assertIn("address", labels)
+        self.assertIn("[ACCOUNT_NO]", result.masked_text)
+        self.assertIn("[CORP_REG_NO]", result.masked_text)
+        self.assertIn("[ADDRESS]", result.masked_text)
+        self.assertNotIn("110-123-456789", result.masked_text)
+        self.assertNotIn("123456-1234567", result.masked_text)
+        self.assertNotIn("서울특별시 강남구 테헤란로", result.masked_text)
+
     def test_masks_with_no_dash_variants(self) -> None:
         rrn = _rrn_with_checksum("9001011" + "23456")
+        foreigner = _foreigner_rrn_with_checksum("9001015" + "23456")
         business = _business_no_with_checksum("130812500")
         card = "4111111111111111"
 
         prompt = (
-            f"RRN {rrn}, business {business}, card {card}"
+            f"RRN {rrn}, foreigner {foreigner}, business {business}, card {card}"
         )
         result = detect_korean_pii(prompt)
         self.assertTrue(result.findings)
         self.assertIn("[BUSINESS_NO]", result.masked_text)
+        self.assertEqual(result.masked_text.count("[RRN]"), 2)
+        self.assertIn("[CARD]", result.masked_text)
+
+    def test_detects_values_attached_to_korean_context(self) -> None:
+        rrn = _rrn_with_checksum("9001011" + "23456")
+        business = _business_no_with_checksum("220116220")
+        prompt = (
+            f"주민번호{rrn[:6]}-{rrn[6:]} "
+            "이메일test-user@example.com "
+            f"사업자번호{business[:3]}-{business[3:5]}-{business[5:]} "
+            "카드4111-1111-1111-1111"
+        )
+
+        result = detect_korean_pii(prompt)
+
+        labels = {finding.label for finding in result.findings}
+        self.assertEqual(labels, {"rrn", "email", "business_no", "card"})
         self.assertIn("[RRN]", result.masked_text)
+        self.assertIn("[EMAIL]", result.masked_text)
+        self.assertIn("[BUSINESS_NO]", result.masked_text)
         self.assertIn("[CARD]", result.masked_text)
 
     def test_negative_numbers_without_sensitive_pattern(self) -> None:
         prompt = (
             "The date is 2026-06-05 and order id is 123-4567-8901. "
-            "Random IDs 12345678, 010-12-3456, and 1111111111111112 are not sensitive."
+            "Random IDs 12345678, 010-12-3456, 123456-1234567, "
+            "110123456789, and 1111111111111112 are not sensitive."
         )
         result = detect_korean_pii(prompt)
         self.assertEqual(result.findings, ())

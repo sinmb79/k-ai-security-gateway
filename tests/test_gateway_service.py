@@ -41,6 +41,21 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertTrue(policy_events)
         self.assertTrue(policy_events[0].payload["effective_prompt_changed"])
 
+    def test_mask_decision_handles_account_and_address(self) -> None:
+        service = GatewayService()
+        request = GatewayRequest(
+            prompt="입금계좌 110-123-456789 및 서울특별시 강남구 테헤란로 123 확인",
+            user_id="alice",
+        )
+
+        evaluation = service.evaluate(request)
+
+        self.assertEqual(evaluation.decision.action.value, "mask")
+        self.assertIn("[ACCOUNT_NO]", evaluation.effective_prompt)
+        self.assertIn("[ADDRESS]", evaluation.effective_prompt)
+        self.assertNotIn("110-123-456789", evaluation.effective_prompt)
+        self.assertNotIn("서울특별시 강남구 테헤란로", evaluation.effective_prompt)
+
     def test_model_routed_event_contains_reproducible_route_payload(self) -> None:
         service = GatewayService()
         request = GatewayRequest(prompt="일반 요청", user_id="alice")
