@@ -279,6 +279,129 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertNotIn("010-1234-5678", str(sent_messages[0]["content"]))
         self.assertEqual(response["choices"][0]["message"]["content"], "provider response")
 
+    def test_chat_completion_masks_sensitive_provider_response(self) -> None:
+        adapter = Mock()
+        adapter.complete.return_value = {
+            "id": "adapter-1",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "고객 연락처는 010-1234-5678 입니다."},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        service = GatewayService()
+
+        with patch("apps.gateway_api.main.resolve_provider_adapter", return_value=adapter):
+            response = evaluate_chat_completion_payload(
+                {
+                    "model": "gateway-test",
+                    "messages": [{"role": "user", "content": "safe content"}],
+                },
+                service=service,
+            )
+
+        content = response["choices"][0]["message"]["content"]
+        self.assertIn("[PHONE]", content)
+        self.assertNotIn("010-1234-5678", content)
+        self.assertEqual(response["gateway_security"]["response_guard"]["action"], "mask")
+        events = service.evidence_store.list_events(response["gateway_security"]["request_id"])
+        response_events = [event for event in events if event.event_type == "response_analyzed"]
+        self.assertEqual(len(response_events), 1)
+        self.assertEqual(response_events[0].payload["action"], "mask")
+        self.assertNotIn("010-1234-5678", str(response_events[0].payload))
+
+    def test_chat_completion_blocks_secret_provider_response(self) -> None:
+        adapter = Mock()
+        adapter.complete.return_value = {
+            "id": "adapter-1",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "API key: sk-1234567890abcdef and password=supersecret1",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        service = GatewayService()
+
+        with patch("apps.gateway_api.main.resolve_provider_adapter", return_value=adapter):
+            response = evaluate_chat_completion_payload(
+                {
+                    "model": "gateway-test",
+                    "messages": [{"role": "user", "content": "safe content"}],
+                },
+                service=service,
+            )
+
+        content = response["choices"][0]["message"]["content"]
+        self.assertNotIn("sk-1234567890abcdef", content)
+        self.assertNotIn("supersecret1", content)
+        self.assertEqual(response["gateway_security"]["response_guard"]["action"], "block")
+        events = service.evidence_store.list_events(response["gateway_security"]["request_id"])
+        response_events = [event for event in events if event.event_type == "response_analyzed"]
+        self.assertEqual(len(response_events), 1)
+        self.assertEqual(response_events[0].payload["action"], "block")
+        self.assertNotIn("sk-1234567890abcdef", str(response_events[0].payload))
+        self.assertNotIn("supersecret1", str(response_events[0].payload))
+
+    def test_chat_completion_records_choice_level_response_guard_summary(self) -> None:
+        adapter = Mock()
+        adapter.complete.return_value = {
+            "id": "adapter-1",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "provider response"},
+                    "finish_reason": "stop",
+                },
+                {
+                    "index": 1,
+                    "message": {
+                        "role": "assistant",
+                        "content": "API key: sk-1234567890abcdef and password=supersecret1",
+                    },
+                    "finish_reason": "stop",
+                },
+            ],
+        }
+        service = GatewayService()
+
+        with patch("apps.gateway_api.main.resolve_provider_adapter", return_value=adapter):
+            response = evaluate_chat_completion_payload(
+                {
+                    "model": "gateway-test",
+                    "messages": [{"role": "user", "content": "safe content"}],
+                },
+                service=service,
+            )
+
+        guard = response["gateway_security"]["response_guard"]
+        self.assertEqual(guard["action"], "block")
+        self.assertEqual(
+            [
+                {
+                    "index": summary["index"],
+                    "action": summary["action"],
+                    "response_changed": summary["response_changed"],
+                }
+                for summary in guard["choices"]
+            ],
+            [
+                {"index": 0, "action": "allow", "response_changed": False},
+                {"index": 1, "action": "block", "response_changed": True},
+            ],
+        )
+        self.assertEqual(response["choices"][0]["message"]["content"], "provider response")
+        self.assertNotIn("sk-1234567890abcdef", response["choices"][1]["message"]["content"])
+
     def test_chat_completion_uses_canonical_prompt_for_allowing_provider(self) -> None:
         adapter = Mock()
         adapter.complete.return_value = {

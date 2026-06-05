@@ -11,6 +11,7 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 from enum import Enum
+from copy import deepcopy
 
 from kai_security.approval.queue import ApprovalRequest
 from kai_security.evidence.sqlite_store import SQLiteEvidenceStore
@@ -22,6 +23,7 @@ from kai_security.openai_compat import (
     extract_chat_prompt,
 )
 from kai_security.providers import resolve_provider_adapter
+from kai_security.response_guard import guard_response_text, response_guard_event_payload
 from kai_security.reports.generator import (
     generate_policy_report,
     generate_privacy_export_check,
@@ -126,6 +128,12 @@ def evaluate_chat_completion_payload(
                 gateway_security=gateway_security,
             )
         )
+        response = _guard_chat_completion_response(
+            response=response,
+            request_id=request.request_id,
+            service=service,
+            gateway_security=gateway_security,
+        )
     response["gateway_security"] = gateway_security
     return response
 
@@ -214,6 +222,76 @@ def _validate_chat_completion_response(response: object) -> dict[str, object]:
             raise RuntimeError("provider response has invalid JSON shape")
 
     return response
+
+
+def _guard_chat_completion_response(
+    *,
+    response: dict[str, object],
+    request_id: str,
+    service: GatewayService,
+    gateway_security: dict[str, object],
+) -> dict[str, object]:
+    guarded_response = deepcopy(response)
+    aggregate_action = "allow"
+    response_changed = False
+    max_risk_score = 0.0
+    finding_count = 0
+    findings: list[object] = []
+    choice_summaries: list[dict[str, object]] = []
+
+    choices = guarded_response.get("choices")
+    if not isinstance(choices, list):
+        raise RuntimeError("provider response has invalid JSON shape")
+    for choice in choices:
+        if not isinstance(choice, dict):
+            raise RuntimeError("provider response has invalid JSON shape")
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            raise RuntimeError("provider response has invalid JSON shape")
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise RuntimeError("provider response has invalid JSON shape")
+
+        guard_result = guard_response_text(content)
+        if guard_result.response_changed:
+            message["content"] = guard_result.content
+            response_changed = True
+        if guard_result.action == "block":
+            aggregate_action = "block"
+        elif guard_result.action == "mask" and aggregate_action != "block":
+            aggregate_action = "mask"
+        max_risk_score = max(max_risk_score, guard_result.detection.risk_score)
+        guard_payload = response_guard_event_payload(guard_result)
+        finding_count += int(guard_payload["finding_count"])
+        findings.extend(guard_payload["findings"])
+        choice_summaries.append(
+            {
+                "index": choice.get("index"),
+                "action": guard_result.action,
+                "risk_score": guard_result.detection.risk_score,
+                "finding_count": len(guard_result.detection.findings),
+                "response_changed": guard_result.response_changed,
+            }
+        )
+
+    payload = {
+        "action": aggregate_action,
+        "risk_score": max_risk_score,
+        "finding_count": finding_count,
+        "findings": findings,
+        "choices": choice_summaries,
+        "response_changed": response_changed,
+    }
+    gateway_security["response_guard"] = payload
+    service.evidence_store.append(
+        AuditEvent(
+            event_type="response_analyzed",
+            request_id=request_id,
+            timestamp=datetime.now(UTC),
+            payload=payload,
+        )
+    )
+    return guarded_response
 
 
 def _coerce_bool(value: object) -> bool:

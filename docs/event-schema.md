@@ -8,6 +8,7 @@
 - `model_routed`
 - `approval_requested` (optional when decision is `require_approval`)
 - `approval_resolved`
+- `response_analyzed` (optional when a provider response is returned)
 - `request_finalized`
 
 ## Common Fields
@@ -74,6 +75,16 @@ must describe the decision reason in human-readable text.
 
 - `approval_id`, `request_id`, `requested_by`, `reason`, `action`, `status`,
   `created_at`, `resolved_by`, `resolved_at`, `resolution_comment`
+
+### `response_analyzed`
+
+- `action` (`allow`, `mask`, or `block`)
+- `risk_score` (number)
+- `finding_count` (number)
+- `findings` (array of metadata objects: `kind`, `label`, `severity`, `confidence`)
+- `choices` (array of per-choice metadata: `index`, `action`, `risk_score`,
+  `finding_count`, `response_changed`)
+- `response_changed` (boolean)
 
 ### `request_finalized`
 
