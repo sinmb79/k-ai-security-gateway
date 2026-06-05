@@ -50,7 +50,7 @@ def default_policy_set() -> PolicySet:
                 reason="high-risk prompt-injection or risk threshold exceeded",
             ),
             PolicyRule(
-                id="policy-001-block-high-risk",
+                id="policy-001b-block-risk-threshold",
                 priority=11,
                 when={"min_risk_score": 0.85},
                 action=PolicyAction.BLOCK,
@@ -75,6 +75,17 @@ def default_policy_set() -> PolicySet:
                 },
                 action=PolicyAction.REQUIRE_APPROVAL,
                 reason="data exfiltration indicators require approval before external model routing",
+            ),
+            PolicyRule(
+                id="policy-003b-document-risk-external-require-approval",
+                priority=35,
+                when={
+                    "finding_kinds_any": [RiskKind.DOCUMENT_RISK],
+                    "model_zone": ModelZone.EXTERNAL,
+                    "min_risk_score": 0.7,
+                },
+                action=PolicyAction.REQUIRE_APPROVAL,
+                reason="document or RAG content contains high-risk hidden instructions",
             ),
             PolicyRule(
                 id="policy-004-external-korean-pii-mask",

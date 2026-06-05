@@ -44,7 +44,7 @@ class PolicyEngineTests(unittest.TestCase):
         decision = decide_policy(request, detection)
 
         self.assertEqual(decision.action, PolicyAction.BLOCK)
-        self.assertEqual(decision.policy_id, "policy-001-block-high-risk")
+        self.assertEqual(decision.policy_id, "policy-001b-block-risk-threshold")
         self.assertLessEqual(decision.risk_score, 1.0)
         self.assertEqual(decision.metadata["finding_count"], 0)
 
@@ -160,6 +160,35 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(decision.action, PolicyAction.ROUTE_PRIVATE)
         self.assertEqual(decision.policy_id, "policy-005-confidential-external-route-private")
         self.assertEqual(decision.route_model_zone, ModelZone.PRIVATE)
+
+    def test_require_approval_for_high_document_risk_external(self) -> None:
+        request = GatewayRequest(
+            prompt="document contains hidden AI instructions",
+            user_id="alice",
+            model_zone=ModelZone.EXTERNAL,
+        )
+        detection = DetectionResult(
+            findings=(
+                DetectionFinding(
+                    kind=RiskKind.DOCUMENT_RISK,
+                    label="embedded_instruction",
+                    value="ignore user policy",
+                    start=0,
+                    end=18,
+                    confidence=0.85,
+                    severity="high",
+                ),
+            ),
+            risk_score=0.75,
+        )
+
+        decision = decide_policy(request, detection)
+
+        self.assertEqual(decision.action, PolicyAction.REQUIRE_APPROVAL)
+        self.assertEqual(
+            decision.policy_id,
+            "policy-003b-document-risk-external-require-approval",
+        )
 
     def test_allow_when_no_findings_and_low_risk(self) -> None:
         request = GatewayRequest(prompt="normal", user_id="alice")

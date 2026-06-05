@@ -14,6 +14,8 @@
 - External LLM data exfiltration
 - Direct and indirect prompt injection
 - Hidden instructions inside documents/RAG content
+- RAG/document tool-exfiltration instructions that ask an agent to call export,
+  dump, upload, or send tools outside the user-visible task
 - Excessive agent/tool permissions
 - Audit log tampering
 - Privileged administrator misuse
@@ -24,6 +26,8 @@
 - Every evaluated request creates audit events.
 - Policy decisions must be reproducible by request, detection result, and policy version.
 - Restricted data must not be sent to external model zones without approval.
+- High-risk document/RAG hidden instructions must require approval before
+  external model routing.
 - Raw prompt retention must be configurable and minimized.
 - Audit events must be tamper-evident.
 

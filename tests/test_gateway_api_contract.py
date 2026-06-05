@@ -231,6 +231,24 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertNotIn("010-1234-5678", content)
         self.assertEqual(response["gateway_security"]["action"], "mask")
 
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_security_evaluate_does_not_return_effective_or_raw_prompt(self) -> None:
+        client = TestClient(app)
+        service = GatewayService()
+        raw_prompt = "ordinary internal planning note"
+
+        with patch("apps.gateway_api.main.gateway", service):
+            response = client.post(
+                "/v1/security/evaluate",
+                json={"prompt": raw_prompt, "user_id": "alice"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertNotIn("effective_prompt", payload)
+        self.assertNotIn(raw_prompt, response.text)
+        self.assertIn("prompt_changed", payload)
+
     def test_chat_completion_masked_messages_are_passed_to_adapter(self) -> None:
         adapter = Mock()
         adapter.complete.return_value = {

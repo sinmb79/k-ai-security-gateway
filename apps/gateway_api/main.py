@@ -437,7 +437,6 @@ if FastAPI is not None:
             "policy_id": decision.policy_id,
             "policy_version": decision.policy_version,
             "risk_score": decision.risk_score,
-            "effective_prompt": evaluation.effective_prompt,
             "prompt_changed": evaluation.prompt_changed,
             "approval_id": evaluation.approval_id,
             "route": _route_payload(route),

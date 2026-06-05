@@ -49,6 +49,7 @@ back to defaults.
 3. Prompt injection with high risk: block.
 4. Confidential data to external model: route private.
 5. Data exfiltration indicators to external model: require approval.
+6. High-risk document/RAG hidden instructions to external model: require approval.
 6. No findings and low risk: allow.
 
 ## API

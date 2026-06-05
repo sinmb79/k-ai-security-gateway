@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from kai_security.approval.queue import InMemoryApprovalQueue
+from kai_security.detectors.document_risk import detect_document_risk
 from kai_security.detectors.pii import detect_korean_pii
 from kai_security.detectors.prompt_risk import detect_prompt_risk
 from kai_security.evidence.store import InMemoryEvidenceStore
@@ -131,7 +132,8 @@ def _combine_detection_results(*results: DetectionResult) -> DetectionResult:
 def _analyze_request(request: GatewayRequest) -> DetectionResult:
     pii = detect_korean_pii(request.prompt)
     prompt_risk = detect_prompt_risk(request.prompt)
-    return _combine_detection_results(pii, prompt_risk)
+    document_risk = detect_document_risk(request.prompt)
+    return _combine_detection_results(pii, prompt_risk, document_risk)
 
 
 def _effective_prompt(prompt: str, detection: DetectionResult, action: object) -> str:

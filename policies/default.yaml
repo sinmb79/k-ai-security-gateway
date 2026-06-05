@@ -2,9 +2,10 @@
   "version": "0.1.0",
   "policies": [
     {"id": "policy-001-block-high-risk", "priority": 10, "when": {"finding_kinds_any": ["prompt_injection"]}, "action": "block", "reason": "high-risk prompt-injection or risk threshold exceeded"},
-    {"id": "policy-001-block-high-risk", "priority": 11, "when": {"min_risk_score": 0.85}, "action": "block", "reason": "high-risk prompt-injection or risk threshold exceeded"},
+    {"id": "policy-001b-block-risk-threshold", "priority": 11, "when": {"min_risk_score": 0.85}, "action": "block", "reason": "high-risk prompt-injection or risk threshold exceeded"},
     {"id": "policy-002-restricted-external-require-approval", "priority": 20, "when": {"data_grade": "restricted", "model_zone": "external"}, "action": "require_approval", "reason": "restricted data must be approved before routing to external models"},
     {"id": "policy-003-data-exfiltration-external-require-approval", "priority": 30, "when": {"finding_kinds_any": ["data_exfiltration"], "model_zone": "external"}, "action": "require_approval", "reason": "data exfiltration indicators require approval before external model routing"},
+    {"id": "policy-003b-document-risk-external-require-approval", "priority": 35, "when": {"finding_kinds_any": ["document_risk"], "model_zone": "external", "min_risk_score": 0.7}, "action": "require_approval", "reason": "document or RAG content contains high-risk hidden instructions"},
     {"id": "policy-004-external-korean-pii-mask", "priority": 40, "when": {"finding_kinds_any": ["korean_pii"], "model_zone": "external"}, "action": "mask", "reason": "korean pii found for external model traffic"},
     {"id": "policy-005-confidential-external-route-private", "priority": 50, "when": {"data_grade": "confidential", "model_zone": "external"}, "action": "route_private", "route_model_zone": "private", "reason": "confidential data must be routed to private model zone"},
     {"id": "policy-006-allow-low-risk", "priority": 60, "when": {"no_findings": true}, "action": "allow", "reason": "no high-risk findings; low-risk request allowed"},
