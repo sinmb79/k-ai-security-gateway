@@ -119,6 +119,9 @@ class SQLiteEvidenceStoreTests(unittest.TestCase):
                 self.assertEqual(reopened.list_events()[0].payload["nested"]["value"], "safe")
                 self.assertEqual(reopened.list_events()[1].payload["nested"]["value"], "safe")
                 self.assertEqual(len(reopened.list_events()), 3)
+                self.assertEqual(len(reopened.list_events(event_type="request_received")), 1)
+                self.assertEqual(len(reopened.list_events(request_id="r1", limit=1)), 1)
+                self.assertEqual(len(reopened.list_events(limit=2)), 2)
 
     def test_append_does_not_retain_caller_payload_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

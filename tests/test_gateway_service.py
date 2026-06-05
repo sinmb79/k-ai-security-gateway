@@ -11,19 +11,24 @@ from kai_security.reports.generator import generate_usage_summary
 class GatewayServiceTests(unittest.TestCase):
     def test_evaluate_records_audit_events(self) -> None:
         service = GatewayService()
-        request = GatewayRequest(prompt="?쇰컲 臾몄꽌 ?붿빟?댁쨾", user_id="alice")
+        request = GatewayRequest(prompt="일반적인 요청입니다.", user_id="alice")
 
         evaluation = service.evaluate(request)
         events = service.evidence_store.list_events(request.request_id)
 
         self.assertIsNotNone(evaluation.decision.action)
-        self.assertGreaterEqual(len(events), 4)
+        self.assertGreaterEqual(len(events), 5)
         self.assertEqual(events[0].event_type, "request_received")
+        self.assertEqual(events[1].event_type, "request_analyzed")
+        self.assertEqual(events[2].event_type, "policy_decided")
+        self.assertEqual(events[3].event_type, "model_routed")
         self.assertEqual(events[-1].event_type, "request_finalized")
+        self.assertIn("route", events[3].payload)
+        self.assertIn("reason", events[3].payload)
 
     def test_mask_decision_returns_effective_masked_prompt(self) -> None:
         service = GatewayService()
-        request = GatewayRequest(prompt="?곕씫泥섎뒗 010-1234-5678 ?낅땲??", user_id="alice")
+        request = GatewayRequest(prompt="전화번호 010-1234-5678이 들어간 요청", user_id="alice")
 
         evaluation = service.evaluate(request)
 
@@ -36,9 +41,52 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertTrue(policy_events)
         self.assertTrue(policy_events[0].payload["effective_prompt_changed"])
 
+    def test_model_routed_event_contains_reproducible_route_payload(self) -> None:
+        service = GatewayService()
+        request = GatewayRequest(prompt="일반 요청", user_id="alice")
+
+        evaluation = service.evaluate(request)
+        events = service.evidence_store.list_events(request.request_id)
+        routed_events = [event for event in events if event.event_type == "model_routed"]
+        self.assertEqual(len(routed_events), 1)
+
+        payload = routed_events[0].payload
+        self.assertEqual(payload["action"], evaluation.decision.action.value)
+        self.assertEqual(payload["policy_id"], evaluation.decision.policy_id)
+        self.assertEqual(payload["policy_version"], evaluation.decision.policy_version)
+        self.assertEqual(payload["requested_model"], request.requested_model)
+        self.assertEqual(payload["effective_prompt_changed"], evaluation.prompt_changed)
+        self.assertIn("reason", payload)
+
+        route = payload["route"]
+        self.assertIsInstance(route, dict)
+        self.assertEqual(route["provider"], "external-openai-compatible")
+        self.assertEqual(route["model"], request.requested_model)
+        self.assertEqual(route["zone"], "external")
+        self.assertEqual(route["reason"], f"policy:{evaluation.decision.policy_id}")
+
+    def test_model_routed_event_null_route_for_approval(self) -> None:
+        service = GatewayService()
+        request = GatewayRequest(
+            prompt="API key and secret may be leaked",
+            user_id="alice",
+            data_grade=DataGrade.RESTRICTED,
+            model_zone=ModelZone.EXTERNAL,
+        )
+
+        evaluation = service.evaluate(request)
+        self.assertEqual(evaluation.decision.action.value, "require_approval")
+
+        events = service.evidence_store.list_events(request.request_id)
+        routed_events = [event for event in events if event.event_type == "model_routed"]
+        self.assertEqual(len(routed_events), 1)
+        self.assertIsNone(routed_events[0].payload["route"])
+        self.assertIn("routing skipped", str(routed_events[0].payload["reason"]))
+        self.assertIn(evaluation.decision.reason, str(routed_events[0].payload["reason"]))
+
     def test_usage_summary_counts_policy_action_once_per_request(self) -> None:
         service = GatewayService()
-        request = GatewayRequest(prompt="?곕씫泥섎뒗 010-1234-5678 ?낅땲??", user_id="alice")
+        request = GatewayRequest(prompt="전화번호 010-1234-5678이 들어간 요청", user_id="alice")
 
         service.evaluate(request)
         summary = generate_usage_summary(service.evidence_store.list_events())

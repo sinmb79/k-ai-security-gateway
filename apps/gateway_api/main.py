@@ -50,6 +50,7 @@ def create_gateway_service() -> GatewayService:
 
 gateway = create_gateway_service()
 _APPROVER_ROLES = {"admin", "security_manager", "approver"}
+_MAX_AUDIT_EVENT_LIMIT = 1000
 _APP_DIR = Path(__file__).resolve().parent
 _STATIC_DIR = _APP_DIR / "static"
 
@@ -472,13 +473,27 @@ if FastAPI is not None:
     @app.get("/v1/audit/events")
     def list_audit_events(
         request_id: str | None = None,
+        event_type: str | None = None,
+        limit: int | None = None,
         authorization: str | None = Header(default=None),
     ) -> list[dict[str, object]]:
         try:
             _require_admin(authorization=authorization)
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
-        return [_event_payload(event) for event in gateway.evidence_store.list_events(request_id)]
+        if limit is not None and limit <= 0:
+            raise HTTPException(status_code=400, detail="limit must be a positive integer")
+        if limit is not None and limit > _MAX_AUDIT_EVENT_LIMIT:
+            raise HTTPException(
+                status_code=400,
+                detail=f"limit must be less than or equal to {_MAX_AUDIT_EVENT_LIMIT}",
+            )
+        return [
+            _event_payload(event)
+            for event in gateway.evidence_store.list_events(
+                request_id=request_id, event_type=event_type, limit=limit
+            )
+        ]
 
     @app.get("/v1/reports/policy")
     def policy_report(authorization: str | None = Header(default=None)) -> dict[str, object]:

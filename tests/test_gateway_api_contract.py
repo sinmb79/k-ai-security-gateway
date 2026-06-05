@@ -708,6 +708,61 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertIn("policies", payload)
 
     @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_audit_events_endpoint_supports_event_type_and_limit(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        service = GatewayService()
+        client = TestClient(app)
+
+        service.evaluate(build_gateway_request({"prompt": "safe prompt", "user_id": "alice"}))
+        service.evaluate(build_gateway_request({"prompt": "safe prompt 2", "user_id": "alice"}))
+        with patch("apps.gateway_api.main.gateway", service):
+            response = client.get(
+                "/v1/audit/events?event_type=request_finalized&limit=1",
+                headers={"Authorization": "Bearer admin-token"},
+            )
+
+        if old_admin_tokens is None:
+            os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+
+        self.assertEqual(response.status_code, 200)
+        events = response.json()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event_type"], "request_finalized")
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_audit_events_endpoint_requires_admin_bearer_and_valid_limit(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        client = TestClient(app)
+        service = GatewayService()
+        service.evaluate(build_gateway_request({"prompt": "safe prompt", "user_id": "alice"}))
+        with patch("apps.gateway_api.main.gateway", service):
+            try:
+                no_auth = client.get("/v1/audit/events")
+                query_token = client.get("/v1/audit/events?admin_token=admin-token")
+                zero_limit = client.get(
+                    "/v1/audit/events?limit=0",
+                    headers={"Authorization": "Bearer admin-token"},
+                )
+                huge_limit = client.get(
+                    "/v1/audit/events?limit=1001",
+                    headers={"Authorization": "Bearer admin-token"},
+                )
+            finally:
+                if old_admin_tokens is None:
+                    os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+                else:
+                    os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+
+        self.assertEqual(no_auth.status_code, 403)
+        self.assertEqual(query_token.status_code, 403)
+        self.assertEqual(zero_limit.status_code, 400)
+        self.assertEqual(huge_limit.status_code, 400)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
     def test_simulate_policy_requires_admin(self) -> None:
         client = TestClient(app)
         response = client.post(

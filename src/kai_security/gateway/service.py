@@ -31,6 +31,7 @@ class GatewayService:
         decision = decide_policy(request, combined_detection, policy_set=self.policy_set)
         effective_prompt = _effective_prompt(request.prompt, combined_detection, decision.action)
         approval_id = None
+        route = choose_route(decision, request.requested_model)
 
         self._record("request_received", request.request_id, {"user_id": request.user_id})
         self._record(
@@ -54,6 +55,16 @@ class GatewayService:
                 "policy_set_version": decision.metadata.get("policy_set_version"),
                 "effective_prompt_changed": effective_prompt != request.prompt,
             },
+        )
+        self._record(
+            "model_routed",
+            request.request_id,
+            _model_route_payload(
+                decision=decision,
+                request=request,
+                route=route,
+                effective_prompt_changed=effective_prompt != request.prompt,
+            ),
         )
         if decision.action.value == "require_approval":
             approval = self.approval_queue.create(
@@ -128,3 +139,36 @@ def _effective_prompt(prompt: str, detection: DetectionResult, action: object) -
     if action_value == "mask" and detection.masked_text:
         return detection.masked_text
     return prompt
+
+
+def _model_route_payload(
+    *,
+    decision: PolicyDecision,
+    request: GatewayRequest,
+    route: ModelRoute | None,
+    effective_prompt_changed: bool,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "action": getattr(decision.action, "value", decision.action),
+        "policy_id": decision.policy_id,
+        "policy_version": decision.policy_version,
+        "requested_model": request.requested_model,
+        "effective_prompt_changed": effective_prompt_changed,
+    }
+
+    if route is None:
+        payload["route"] = None
+        payload["reason"] = (
+            f"routing skipped because action '{getattr(decision.action, 'value', decision.action)}' "
+            f"does not require provider routing: {decision.reason}"
+        )
+        return payload
+
+    payload["route"] = {
+        "provider": route.provider,
+        "model": route.model,
+        "zone": route.zone.value,
+        "reason": route.reason,
+    }
+    payload["reason"] = route.reason
+    return payload

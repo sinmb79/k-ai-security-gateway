@@ -79,7 +79,14 @@ class SQLiteEvidenceStore:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    def list_events(self, request_id: str | None = None) -> list[AuditEvent]:
+    def list_events(
+        self,
+        request_id: str | None = None,
+        event_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[AuditEvent]:
+        if limit is not None and limit <= 0:
+            return []
         query = """
         SELECT
             event_id,
@@ -92,14 +99,23 @@ class SQLiteEvidenceStore:
             sequence
         FROM evidence_events
         """
-        params: tuple[str, ...] = ()
+        where_clauses: list[str] = []
+        params: list[str | int] = []
         if request_id is not None:
-            query += " WHERE request_id = ?"
-            params = (request_id,)
+            where_clauses.append("request_id = ?")
+            params.append(request_id)
+        if event_type is not None:
+            where_clauses.append("event_type = ?")
+            params.append(event_type)
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
         query += " ORDER BY sequence ASC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
 
         with self._lock:
-            rows = self._conn.execute(query, params).fetchall()
+            rows = self._conn.execute(query, tuple(params)).fetchall()
         return [self._row_to_event(row) for row in rows]
 
     def verify_chain(self) -> bool:

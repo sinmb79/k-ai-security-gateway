@@ -42,10 +42,21 @@ class InMemoryEvidenceStore:
         self._events.append(hashed_event)
         return hashed_event
 
-    def list_events(self, request_id: str | None = None) -> list[AuditEvent]:
-        events = self._events if request_id is None else [
-            event for event in self._events if event.request_id == request_id
-        ]
+    def list_events(
+        self,
+        request_id: str | None = None,
+        event_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[AuditEvent]:
+        if limit is not None and limit <= 0:
+            return []
+        events = self._events
+        if request_id is not None:
+            events = [event for event in events if event.request_id == request_id]
+        if event_type is not None:
+            events = [event for event in events if event.event_type == event_type]
+        if limit is not None:
+            events = events[:limit]
         return [replace(event, payload=deepcopy(event.payload)) for event in events]
 
     def verify_chain(self) -> bool:

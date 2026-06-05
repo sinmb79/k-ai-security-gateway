@@ -68,6 +68,38 @@ class EvidenceStoreTests(unittest.TestCase):
 
         self.assertEqual(len(store.list_events()), 1)
 
+    def test_list_events_filters_and_limits(self) -> None:
+        store = InMemoryEvidenceStore()
+        store.append(
+            AuditEvent(
+                event_type="request_received",
+                request_id="r1",
+                timestamp=datetime(2026, 6, 5, 1, 2, 3, tzinfo=UTC),
+                payload={"user_id": "alice", "action": "read"},
+            )
+        )
+        store.append(
+            AuditEvent(
+                event_type="request_analyzed",
+                request_id="r1",
+                timestamp=datetime(2026, 6, 5, 1, 2, 4, tzinfo=UTC),
+                payload={"risk": 0.2},
+            )
+        )
+        store.append(
+            AuditEvent(
+                event_type="request_received",
+                request_id="r2",
+                timestamp=datetime(2026, 6, 5, 1, 2, 5, tzinfo=UTC),
+                payload={"user_id": "alice", "action": "read"},
+            )
+        )
+
+        self.assertEqual(len(store.list_events(event_type="request_analyzed")), 1)
+        self.assertEqual(len(store.list_events(request_id="r1", event_type="request_analyzed")), 1)
+        self.assertEqual(len(store.list_events(limit=1)), 1)
+        self.assertEqual(len(store.list_events(request_id="r1", limit=1)), 1)
+
     def test_list_events_does_not_expose_payload_mutation(self) -> None:
         store = InMemoryEvidenceStore()
         store.append(
