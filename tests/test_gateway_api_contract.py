@@ -856,11 +856,15 @@ class GatewayApiContractTests(unittest.TestCase):
         service = GatewayService()
         client = TestClient(app)
 
-        service.evaluate(build_gateway_request({"prompt": "safe prompt", "user_id": "alice"}))
-        service.evaluate(build_gateway_request({"prompt": "safe prompt 2", "user_id": "alice"}))
+        first = service.evaluate(build_gateway_request({"prompt": "safe prompt", "user_id": "alice"}))
+        second = service.evaluate(build_gateway_request({"prompt": "safe prompt 2", "user_id": "alice"}))
         with patch("apps.gateway_api.main.gateway", service):
             response = client.get(
                 "/v1/audit/events?event_type=request_finalized&limit=1",
+                headers={"Authorization": "Bearer admin-token"},
+            )
+            latest_response = client.get(
+                "/v1/audit/events?event_type=request_finalized&order=desc&limit=1",
                 headers={"Authorization": "Bearer admin-token"},
             )
 
@@ -873,6 +877,43 @@ class GatewayApiContractTests(unittest.TestCase):
         events = response.json()
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["event_type"], "request_finalized")
+        self.assertEqual(events[0]["request_id"], first.request.request_id)
+        self.assertEqual(latest_response.status_code, 200)
+        latest_events = latest_response.json()
+        self.assertEqual(latest_events[0]["request_id"], second.request.request_id)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_audit_events_endpoint_supports_payload_filters(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        service = GatewayService()
+        client = TestClient(app)
+
+        service.evaluate(build_gateway_request({"prompt": "safe prompt", "user_id": "alice"}))
+        pii = service.evaluate(
+            build_gateway_request({"prompt": "고객 연락처는 010-1234-5678 입니다.", "user_id": "bob"})
+        )
+        with patch("apps.gateway_api.main.gateway", service):
+            response = client.get(
+                "/v1/audit/events"
+                f"?request_id={pii.request.request_id}"
+                "&event_type=policy_decided"
+                "&action=mask"
+                "&policy_id=policy-004-external-korean-pii-mask",
+                headers={"Authorization": "Bearer admin-token"},
+            )
+
+        if old_admin_tokens is None:
+            os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+
+        self.assertEqual(response.status_code, 200)
+        events = response.json()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["request_id"], pii.request.request_id)
+        self.assertEqual(events[0]["payload"]["action"], "mask")
+        self.assertEqual(events[0]["payload"]["policy_id"], "policy-004-external-korean-pii-mask")
 
     @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
     def test_audit_events_endpoint_requires_admin_bearer_and_valid_limit(self) -> None:
@@ -903,6 +944,122 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(query_token.status_code, 403)
         self.assertEqual(zero_limit.status_code, 400)
         self.assertEqual(huge_limit.status_code, 400)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_audit_events_endpoint_rejects_invalid_filters(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        client = TestClient(app)
+        service = GatewayService()
+        service.evaluate(build_gateway_request({"prompt": "safe prompt", "user_id": "alice"}))
+        with patch("apps.gateway_api.main.gateway", service):
+            bad_order = client.get(
+                "/v1/audit/events?order=sideways",
+                headers={"Authorization": "Bearer admin-token"},
+            )
+            bad_time_range = client.get(
+                "/v1/audit/events?from_timestamp=2026-06-05T10:00:00Z&to_timestamp=2026-06-05T09:00:00Z",
+                headers={"Authorization": "Bearer admin-token"},
+            )
+
+        if old_admin_tokens is None:
+            os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+
+        self.assertEqual(bad_order.status_code, 400)
+        self.assertEqual(bad_time_range.status_code, 400)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_audit_events_export_requires_admin_and_supports_csv(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        client = TestClient(app)
+        service = GatewayService()
+        service.evidence_store.append(
+            AuditEvent(
+                event_type="policy_decided",
+                request_id="+request-formula",
+                timestamp=datetime.now(UTC),
+                payload={
+                    "action": "block",
+                    "policy_id": "=SUM(1,1)",
+                    "reason": "formula test",
+                    "resolution_comment": "should not be exported",
+                },
+            )
+        )
+        with patch("apps.gateway_api.main.gateway", service):
+            no_auth = client.get("/v1/audit/events/export?format=csv")
+            query_token = client.get("/v1/audit/events/export?format=csv&admin_token=admin-token")
+            response = client.get(
+                "/v1/audit/events/export?format=csv&event_type=policy_decided&action=block",
+                headers={"Authorization": "Bearer admin-token"},
+            )
+
+        if old_admin_tokens is None:
+            os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+
+        self.assertEqual(no_auth.status_code, 403)
+        self.assertEqual(query_token.status_code, 403)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/csv", response.headers["content-type"])
+        self.assertIn("kai-audit-events.csv", response.headers["content-disposition"])
+        self.assertIn("'+request-formula", response.text)
+        self.assertIn("'=SUM(1,1)", response.text)
+        self.assertNotIn("should not be exported", response.text)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_audit_events_export_jsonl_uses_safe_payload(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        client = TestClient(app)
+        service = GatewayService()
+        service.evidence_store.append(
+            AuditEvent(
+                event_type="approval_resolved",
+                request_id="req-jsonl",
+                timestamp=datetime.now(UTC),
+                payload={
+                    "approval_id": "approval-1",
+                    "request_id": "req-jsonl",
+                    "requested_by": "alice",
+                    "reason": "approval done",
+                    "action": "require_approval",
+                    "status": "approved",
+                    "created_at": "2026-06-05T00:00:00+00:00",
+                    "resolved_by": "manager-1",
+                    "resolved_at": "2026-06-05T00:01:00+00:00",
+                    "approver_role": "security_manager",
+                    "resolution_comment": "raw operator note must stay out",
+                },
+            )
+        )
+        with patch("apps.gateway_api.main.gateway", service):
+            response = client.get(
+                "/v1/audit/events/export?format=jsonl&event_type=approval_resolved",
+                headers={"Authorization": "Bearer admin-token"},
+            )
+            bad_format = client.get(
+                "/v1/audit/events/export?format=xml",
+                headers={"Authorization": "Bearer admin-token"},
+            )
+
+        if old_admin_tokens is None:
+            os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("application/x-ndjson", response.headers["content-type"])
+        rows = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["payload"]["approval_id"], "approval-1")
+        self.assertNotIn("resolution_comment", rows[0]["payload"])
+        self.assertNotIn("raw operator note", response.text)
+        self.assertEqual(bad_format.status_code, 400)
 
     @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
     def test_resolve_approval_requires_admin_bearer(self) -> None:

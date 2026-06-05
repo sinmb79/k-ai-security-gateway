@@ -8,6 +8,14 @@ const state = {
   evidencePackage: null,
   approvalUiState: {},
   approvalDraftComments: {},
+  eventFilters: {
+    request_id: "",
+    event_type: "",
+    action: "",
+    policy_id: "",
+    order: "desc",
+    limit: "100",
+  },
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -118,6 +126,50 @@ async function fetchJson(url, options = {}) {
   return response.json();
 }
 
+function buildEventQuery(extra = {}) {
+  const params = new URLSearchParams();
+  const filters = { ...state.eventFilters, ...extra };
+  Object.entries(filters).forEach(([key, value]) => {
+    const normalized = String(value ?? "").trim();
+    if (normalized) {
+      params.set(key, normalized);
+    }
+  });
+  return params.toString();
+}
+
+async function fetchAuditEvents() {
+  const query = buildEventQuery();
+  return fetchJson(`/v1/audit/events${query ? `?${query}` : ""}`, { admin: true });
+}
+
+async function fetchAuditEventExport(format) {
+  if (!adminToken) {
+    throw new Error("admin token is required");
+  }
+  const query = buildEventQuery({ format });
+  const response = await fetch(`/v1/audit/events/export?${query}`, {
+    headers: withAdminHeaders(),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`${response.status} ${text}`);
+  }
+  return response.text();
+}
+
+function downloadText(filename, content, contentType) {
+  const blob = new Blob([content], { type: contentType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 async function submitPrompt(prompt, dataGrade = "internal") {
   return fetchJson("/v1/chat/completions", {
     method: "POST",
@@ -174,25 +226,27 @@ async function refresh() {
     state.evidencePackage = null;
     render();
     $("#serverStatus").textContent = "API authorization required";
+    $("#eventFilterStatus").textContent = "관리자 토큰 필요";
     setApprovalActionStatus("Need admin token");
     setEvidencePackageStatus("Need admin token", APPROVAL_STATUS.ERROR);
     return;
   }
   try {
     const [events, policyReport, privacy, approvals, policySummary] = await Promise.all([
-      fetchJson("/v1/audit/events", { admin: true }),
+      fetchAuditEvents(),
       fetchJson("/v1/reports/policy", { admin: true }),
       fetchJson("/v1/reports/privacy-export", { admin: true }),
       fetchJson("/v1/approvals/pending", { admin: true }),
       fetchPolicies(),
     ]);
-    state.events = events.reverse();
+    state.events = events;
     state.policy = policyReport;
     state.privacy = privacy;
     state.approvals = approvals;
     state.policySummary = policySummary;
     render();
     $("#serverStatus").textContent = "API reachable";
+    $("#eventFilterStatus").textContent = "검색 완료";
     setApprovalActionStatus("Ready");
   } catch (error) {
     clearApprovalActionState();
@@ -205,6 +259,7 @@ async function refresh() {
     state.evidencePackage = null;
     render();
     $("#serverStatus").textContent = "API error";
+    $("#eventFilterStatus").textContent = `검색 실패: ${error.message}`;
     setApprovalActionStatus(`Load failed: ${error.message}`, APPROVAL_STATUS.ERROR);
     setEvidencePackageStatus(`Load failed: ${error.message}`, APPROVAL_STATUS.ERROR);
     console.error(error);
@@ -398,6 +453,73 @@ async function handleEvidencePackageSubmit(event) {
   await loadEvidencePackage($("#evidenceRequestId").value);
 }
 
+function readEventFiltersFromForm() {
+  state.eventFilters = {
+    request_id: $("#eventRequestId").value.trim(),
+    event_type: $("#eventTypeFilter").value,
+    action: $("#eventActionFilter").value,
+    policy_id: $("#eventPolicyIdFilter").value.trim(),
+    order: $("#eventOrderFilter").value || "desc",
+    limit: $("#eventLimitFilter").value.trim() || "100",
+  };
+}
+
+function syncEventFilterForm() {
+  $("#eventRequestId").value = state.eventFilters.request_id;
+  $("#eventTypeFilter").value = state.eventFilters.event_type;
+  $("#eventActionFilter").value = state.eventFilters.action;
+  $("#eventPolicyIdFilter").value = state.eventFilters.policy_id;
+  $("#eventOrderFilter").value = state.eventFilters.order || "desc";
+  $("#eventLimitFilter").value = state.eventFilters.limit || "100";
+}
+
+async function handleEventFilterSubmit(event) {
+  event.preventDefault();
+  readEventFiltersFromForm();
+  $("#eventFilterStatus").textContent = "검색 중...";
+  await refresh();
+}
+
+async function clearEventFilters() {
+  state.eventFilters = {
+    request_id: "",
+    event_type: "",
+    action: "",
+    policy_id: "",
+    order: "desc",
+    limit: "100",
+  };
+  syncEventFilterForm();
+  $("#eventFilterStatus").textContent = "필터 초기화";
+  await refresh();
+}
+
+async function handleEventExportClick(event) {
+  const button = event.target;
+  if (!(button instanceof HTMLButtonElement)) return;
+  const format = button.dataset.format;
+  if (format !== "csv" && format !== "jsonl") return;
+
+  readEventFiltersFromForm();
+  $("#eventFilterStatus").textContent = `${format.toUpperCase()} 생성 중...`;
+  try {
+    const content = await fetchAuditEventExport(format);
+    const timestamp = new Date().toISOString().replaceAll(":", "-").slice(0, 19);
+    if (format === "csv") {
+      downloadText(`kai-audit-events-${timestamp}.csv`, content, "text/csv;charset=utf-8");
+    } else {
+      downloadText(
+        `kai-audit-events-${timestamp}.jsonl`,
+        content,
+        "application/x-ndjson;charset=utf-8",
+      );
+    }
+    $("#eventFilterStatus").textContent = `${format.toUpperCase()} 다운로드 준비 완료`;
+  } catch (error) {
+    $("#eventFilterStatus").textContent = `내보내기 실패: ${error.message}`;
+  }
+}
+
 async function handleEventTableClick(event) {
   const button = event.target;
   if (!(button instanceof HTMLButtonElement)) return;
@@ -468,13 +590,13 @@ function render() {
 }
 
 function renderEvents() {
-  const rows = state.events.slice(0, 12).map((event) => {
+  const rows = state.events.slice(0, 50).map((event) => {
     const action = event.payload?.action || event.payload?.status || "";
     const policyId = event.payload?.policy_id || event.payload?.approval_id || "-";
     const requestId = escapeHtml(event.request_id);
     return `<tr>
       <td>${formatTime(event.timestamp)}</td>
-      <td>${escapeHtml(event.event_type)}</td>
+      <td title="${escapeHtml(event.event_type)}">${escapeHtml(event.event_type)}</td>
       <td><button type="button" class="link-button event-request-button" data-request-id="${requestId}">${escapeHtml(shortId(event.request_id))}</button></td>
       <td>${action ? actionBadge(action) : ""} <span class="muted">${escapeHtml(policyId)}</span></td>
     </tr>`;
@@ -695,18 +817,24 @@ $("#promptForm").addEventListener("submit", handlePromptSubmit);
 $("#authForm").addEventListener("submit", handleAuthSubmit);
 $("#policySimulateForm").addEventListener("submit", handlePolicySimulateSubmit);
 $("#evidencePackageForm").addEventListener("submit", handleEvidencePackageSubmit);
+$("#eventFilterForm").addEventListener("submit", handleEventFilterSubmit);
 $("#clearToken").addEventListener("click", clearAdminToken);
+$("#clearEventFilters").addEventListener("click", clearEventFilters);
 $("#approverToken").addEventListener("input", handleApproverTokenInput);
 $("#clearApproverToken").addEventListener("click", clearApproverToken);
 $("#approvalList").addEventListener("click", handleApprovalActionClick);
 $("#approvalList").addEventListener("input", handleApprovalCommentInput);
 $("#eventRows").addEventListener("click", handleEventTableClick);
+document.querySelectorAll(".export-button").forEach((button) => {
+  button.addEventListener("click", handleEventExportClick);
+});
 $("#sampleMask").addEventListener("click", seedMask);
 $("#sampleApproval").addEventListener("click", seedApproval);
 $("#refresh").addEventListener("click", refresh);
 
 syncAuthInput();
 syncApproverInput();
+syncEventFilterForm();
 setApprovalActionStatus("Ready");
 setEvidencePackageStatus("미조회");
 refresh();

@@ -66,6 +66,11 @@ Current admin endpoints:
 - `GET /v1/policies` returns active policy set version, source, and summaries.
 - `POST /v1/policies/simulate` runs detection + policy decision + route computation
   without calling any model provider or approval queue.
+- `GET /v1/audit/events` searches audit events by `request_id`, `event_type`,
+  `action`, `policy_id`, timestamp range, order, and limit.
+- `GET /v1/audit/events/export?format=csv|jsonl` exports the same safe event
+  search result set. CSV cells are escaped for spreadsheet formula safety and
+  JSONL uses report-safe payload summaries instead of raw free-form payloads.
 - `GET /v1/reports/evidence-package/{request_id}` returns request-level evidence package
   for admin users using Bearer token authentication.
   `KAI_SECURITY_REPORT_CHAIN_VERIFY_MAX_EVENTS` controls when full hash-chain

@@ -7,8 +7,11 @@ The core MVP is dependency-free. If FastAPI is installed, run:
 
 from __future__ import annotations
 
+import csv
+import json
 import os
 from datetime import UTC, datetime
+from io import StringIO
 from pathlib import Path
 from enum import Enum
 from copy import deepcopy
@@ -28,17 +31,19 @@ from kai_security.reports.generator import (
     generate_policy_report,
     generate_privacy_export_check,
     generate_request_evidence_package,
+    summarize_audit_event,
 )
 
 try:
     from fastapi import FastAPI, Header, HTTPException
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, Response
     from fastapi.staticfiles import StaticFiles
 except ModuleNotFoundError:  # pragma: no cover - import guard for dependency-free tests
     FastAPI = None  # type: ignore[assignment]
     Header = None  # type: ignore[assignment]
     HTTPException = None  # type: ignore[assignment]
     FileResponse = None  # type: ignore[assignment]
+    Response = None  # type: ignore[assignment]
     StaticFiles = None  # type: ignore[assignment]
 
 
@@ -57,6 +62,7 @@ def create_gateway_service() -> GatewayService:
 gateway = create_gateway_service()
 _APPROVER_ROLES = {"admin", "security_manager", "approver"}
 _MAX_AUDIT_EVENT_LIMIT = 1000
+_MAX_AUDIT_EVENT_EXPORT_LIMIT = 5000
 _DEFAULT_CHAIN_VERIFY_MAX_EVENTS = 50000
 _APP_DIR = Path(__file__).resolve().parent
 _STATIC_DIR = _APP_DIR / "static"
@@ -446,6 +452,137 @@ def _event_payload(event: AuditEvent) -> dict[str, object]:
     }
 
 
+def _parse_audit_timestamp(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValueError(f"invalid timestamp: {value}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _payload_value(event: AuditEvent, key: str) -> str:
+    value = event.payload.get(key)
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _csv_safe_value(value: object) -> str:
+    text = str(value or "")
+    if text.startswith(("=", "+", "-", "@")):
+        return f"'{text}"
+    return text
+
+
+def _query_audit_events(
+    *,
+    request_id: str | None = None,
+    event_type: str | None = None,
+    action: str | None = None,
+    policy_id: str | None = None,
+    from_timestamp: str | None = None,
+    to_timestamp: str | None = None,
+    order: str = "asc",
+    limit: int | None = None,
+    evidence_store: object,
+) -> list[AuditEvent]:
+    from_dt = _parse_audit_timestamp(from_timestamp)
+    to_dt = _parse_audit_timestamp(to_timestamp)
+    if from_dt is not None and to_dt is not None and from_dt > to_dt:
+        raise ValueError("from_timestamp must be earlier than or equal to to_timestamp")
+    normalized_order = order.strip().lower()
+    if normalized_order not in {"asc", "desc"}:
+        raise ValueError("order must be 'asc' or 'desc'")
+
+    list_events = getattr(evidence_store, "list_events")
+    events = list_events(request_id=request_id or None, event_type=event_type or None)
+    action_filter = action.strip() if action else ""
+    policy_filter = policy_id.strip() if policy_id else ""
+    filtered: list[AuditEvent] = []
+    for event in events:
+        event_time = event.timestamp
+        if event_time.tzinfo is None:
+            event_time = event_time.replace(tzinfo=UTC)
+        event_time = event_time.astimezone(UTC)
+        if from_dt is not None and event_time < from_dt:
+            continue
+        if to_dt is not None and event_time > to_dt:
+            continue
+        if action_filter and _payload_value(event, "action") != action_filter:
+            continue
+        if policy_filter and _payload_value(event, "policy_id") != policy_filter:
+            continue
+        filtered.append(event)
+
+    if normalized_order == "desc":
+        filtered.reverse()
+    if limit is not None:
+        return filtered[:limit]
+    return filtered
+
+
+def _validate_audit_event_limit(limit: int | None, *, max_limit: int) -> None:
+    if limit is not None and limit <= 0:
+        raise ValueError("limit must be a positive integer")
+    if limit is not None and limit > max_limit:
+        raise ValueError(f"limit must be less than or equal to {max_limit}")
+
+
+def _audit_event_csv(events: list[AuditEvent]) -> str:
+    output = StringIO()
+    fieldnames = [
+        "event_id",
+        "request_id",
+        "timestamp",
+        "event_type",
+        "action",
+        "status",
+        "policy_id",
+        "approval_id",
+        "risk_score",
+        "finding_count",
+        "event_hash",
+        "previous_hash",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames, lineterminator="\n")
+    writer.writeheader()
+    for event in events:
+        writer.writerow(
+            {
+                "event_id": _csv_safe_value(event.event_id),
+                "request_id": _csv_safe_value(event.request_id),
+                "timestamp": _csv_safe_value(event.timestamp.isoformat()),
+                "event_type": _csv_safe_value(event.event_type),
+                "action": _csv_safe_value(_payload_value(event, "action")),
+                "status": _csv_safe_value(_payload_value(event, "status")),
+                "policy_id": _csv_safe_value(_payload_value(event, "policy_id")),
+                "approval_id": _csv_safe_value(_payload_value(event, "approval_id")),
+                "risk_score": _csv_safe_value(_payload_value(event, "risk_score")),
+                "finding_count": _csv_safe_value(_payload_value(event, "finding_count")),
+                "event_hash": _csv_safe_value(event.event_hash),
+                "previous_hash": _csv_safe_value(event.previous_hash),
+            }
+        )
+    return output.getvalue()
+
+
+def _audit_event_jsonl(events: list[AuditEvent]) -> str:
+    rows = [
+        json.dumps(summarize_audit_event(event), ensure_ascii=False, sort_keys=True)
+        for event in events
+    ]
+    return "\n".join(rows) + ("\n" if rows else "")
+
+
 def _report_chain_verify_max_events() -> int:
     raw = os.environ.get(
         "KAI_SECURITY_REPORT_CHAIN_VERIFY_MAX_EVENTS",
@@ -597,26 +734,82 @@ if FastAPI is not None:
     def list_audit_events(
         request_id: str | None = None,
         event_type: str | None = None,
+        action: str | None = None,
+        policy_id: str | None = None,
+        from_timestamp: str | None = None,
+        to_timestamp: str | None = None,
+        order: str = "asc",
         limit: int | None = None,
         authorization: str | None = Header(default=None),
     ) -> list[dict[str, object]]:
         try:
             _require_admin(authorization=authorization)
+            _validate_audit_event_limit(limit, max_limit=_MAX_AUDIT_EVENT_LIMIT)
+            events = _query_audit_events(
+                request_id=request_id,
+                event_type=event_type,
+                action=action,
+                policy_id=policy_id,
+                from_timestamp=from_timestamp,
+                to_timestamp=to_timestamp,
+                order=order,
+                limit=limit,
+                evidence_store=gateway.evidence_store,
+            )
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
-        if limit is not None and limit <= 0:
-            raise HTTPException(status_code=400, detail="limit must be a positive integer")
-        if limit is not None and limit > _MAX_AUDIT_EVENT_LIMIT:
-            raise HTTPException(
-                status_code=400,
-                detail=f"limit must be less than or equal to {_MAX_AUDIT_EVENT_LIMIT}",
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return [_event_payload(event) for event in events]
+
+    @app.get("/v1/audit/events/export")
+    def export_audit_events(
+        request_id: str | None = None,
+        event_type: str | None = None,
+        action: str | None = None,
+        policy_id: str | None = None,
+        from_timestamp: str | None = None,
+        to_timestamp: str | None = None,
+        order: str = "asc",
+        limit: int | None = None,
+        format: str = "csv",
+        authorization: str | None = Header(default=None),
+    ):
+        try:
+            _require_admin(authorization=authorization)
+            _validate_audit_event_limit(limit, max_limit=_MAX_AUDIT_EVENT_EXPORT_LIMIT)
+            events = _query_audit_events(
+                request_id=request_id,
+                event_type=event_type,
+                action=action,
+                policy_id=policy_id,
+                from_timestamp=from_timestamp,
+                to_timestamp=to_timestamp,
+                order=order,
+                limit=limit,
+                evidence_store=gateway.evidence_store,
             )
-        return [
-            _event_payload(event)
-            for event in gateway.evidence_store.list_events(
-                request_id=request_id, event_type=event_type, limit=limit
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        export_format = format.strip().lower()
+        if export_format == "csv":
+            body = _audit_event_csv(events)
+            return Response(
+                content=body,
+                media_type="text/csv; charset=utf-8",
+                headers={"Content-Disposition": 'attachment; filename="kai-audit-events.csv"'},
             )
-        ]
+        if export_format == "jsonl":
+            body = _audit_event_jsonl(events)
+            return Response(
+                content=body,
+                media_type="application/x-ndjson; charset=utf-8",
+                headers={"Content-Disposition": 'attachment; filename="kai-audit-events.jsonl"'},
+            )
+        raise HTTPException(status_code=400, detail="format must be 'csv' or 'jsonl'")
 
     @app.get("/v1/reports/policy")
     def policy_report(authorization: str | None = Header(default=None)) -> dict[str, object]:

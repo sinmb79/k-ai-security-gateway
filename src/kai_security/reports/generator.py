@@ -94,6 +94,11 @@ def _event_payload_summary(event: AuditEvent) -> dict[str, object]:
     }
 
 
+def summarize_audit_event(event: AuditEvent) -> dict[str, object]:
+    """Return an audit event with payload limited to report-safe metadata."""
+    return _event_payload_summary(event)
+
+
 def _safe_timeline_payload(event: AuditEvent) -> dict[str, object]:
     allowed_keys = _SAFE_TIMELINE_PAYLOAD_KEYS.get(event.event_type, ())
     return {key: event.payload[key] for key in allowed_keys if key in event.payload}

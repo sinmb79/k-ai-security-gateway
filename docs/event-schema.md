@@ -121,3 +121,14 @@ Full hash-chain verification is capped by
 `KAI_SECURITY_REPORT_CHAIN_VERIFY_MAX_EVENTS` (default: `50000`). When the store
 exceeds this threshold, `chain_verified` is `null` and `chain_verification.status`
 is `skipped` so the admin API cannot become an unbounded verification endpoint.
+
+## Audit Event Search And Export
+
+`GET /v1/audit/events` supports admin-only event search by `request_id`,
+`event_type`, payload `action`, payload `policy_id`, timestamp range, sort order,
+and limit. `GET /v1/audit/events/export?format=csv|jsonl` applies the same search
+filters for downloadable evidence extracts.
+
+CSV exports contain fixed metadata columns and escape spreadsheet formula prefixes.
+JSONL exports use the same safe payload whitelist as request evidence packages, so
+raw prompts, raw model responses, and free-form approval comments are not included.

@@ -108,6 +108,59 @@
               <h2>최근 이벤트</h2>
               <span id="eventCount">0개</span>
             </div>
+            <form id="eventFilterForm" class="event-filter-form">
+              <label>
+                <span>요청 ID</span>
+                <input id="eventRequestId" autocomplete="off" placeholder="전체 request_id" />
+              </label>
+              <label>
+                <span>이벤트 유형</span>
+                <select id="eventTypeFilter">
+                  <option value="">전체</option>
+                  <option value="request_received">request_received</option>
+                  <option value="request_analyzed">request_analyzed</option>
+                  <option value="policy_decided">policy_decided</option>
+                  <option value="model_routed">model_routed</option>
+                  <option value="request_finalized">request_finalized</option>
+                  <option value="response_analyzed">response_analyzed</option>
+                  <option value="approval_requested">approval_requested</option>
+                  <option value="approval_resolved">approval_resolved</option>
+                </select>
+              </label>
+              <label>
+                <span>조치</span>
+                <select id="eventActionFilter">
+                  <option value="">전체</option>
+                  <option value="allow">allow</option>
+                  <option value="mask">mask</option>
+                  <option value="route_private">route_private</option>
+                  <option value="require_approval">require_approval</option>
+                  <option value="block">block</option>
+                </select>
+              </label>
+              <label>
+                <span>정책 ID</span>
+                <input id="eventPolicyIdFilter" autocomplete="off" placeholder="policy-..." />
+              </label>
+              <label>
+                <span>정렬</span>
+                <select id="eventOrderFilter">
+                  <option value="desc" selected>최신순</option>
+                  <option value="asc">오래된순</option>
+                </select>
+              </label>
+              <label>
+                <span>상한</span>
+                <input id="eventLimitFilter" type="number" min="1" max="1000" value="100" />
+              </label>
+              <div class="event-filter-actions">
+                <button type="submit">검색</button>
+                <button id="clearEventFilters" type="button">초기화</button>
+                <button class="export-button" type="button" data-format="csv">CSV</button>
+                <button class="export-button" type="button" data-format="jsonl">JSONL</button>
+              </div>
+              <span id="eventFilterStatus" class="muted">필터 준비됨</span>
+            </form>
             <div class="table-wrap">
               <table>
                 <thead>
