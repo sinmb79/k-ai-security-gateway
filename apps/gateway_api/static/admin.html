@@ -19,6 +19,7 @@
         <nav class="nav" aria-label="메인 메뉴">
           <a class="active" href="#overview">개요</a>
           <a href="#events">이벤트</a>
+          <a href="#evidence-package">증거 패키지</a>
           <a href="#policy">정책 집계</a>
           <a href="#policy-simulate">정책 시뮬레이션</a>
           <a href="#approvals">승인 대기</a>
@@ -120,6 +121,24 @@
                 <tbody id="eventRows"></tbody>
               </table>
             </div>
+          </article>
+
+          <article class="panel full" id="evidence-package">
+            <div class="panel-head">
+              <h2>증거 패키지</h2>
+              <span id="evidencePackageStatus">미조회</span>
+            </div>
+            <form id="evidencePackageForm" class="mini-form">
+              <div class="evidence-query-row">
+                <label>
+                  <span>요청 ID</span>
+                  <input id="evidenceRequestId" autocomplete="off" placeholder="request_id" />
+                </label>
+                <button type="submit">조회</button>
+              </div>
+            </form>
+            <dl id="evidenceSummary" class="result-list evidence-summary"></dl>
+            <div id="evidenceTimeline" class="evidence-timeline"></div>
           </article>
 
           <article class="panel" id="policy">

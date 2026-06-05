@@ -71,6 +71,9 @@ Current admin endpoints:
   `KAI_SECURITY_REPORT_CHAIN_VERIFY_MAX_EVENTS` controls when full hash-chain
   verification is skipped for large stores (default: `50000`).
 
+The `/admin` dashboard can query evidence packages by `request_id` and open a
+request package directly from recent audit events.
+
 ## Approval Tokens
 
 Approval resolution through the API requires server-side approver tokens. Configure

@@ -271,6 +271,13 @@ button.primary,
   grid-column: 1;
 }
 
+.evidence-query-row {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
 .result-list {
   margin: 0;
   padding: 10px 14px;
@@ -386,6 +393,10 @@ button.primary,
 
 .panel.wide {
   grid-row: span 2;
+}
+
+.panel.full {
+  grid-column: 1 / -1;
 }
 
 .panel-head {
@@ -593,6 +604,64 @@ th {
   border-radius: 8px;
 }
 
+.link-button {
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  padding: 0;
+  font-size: 13px;
+  font-weight: 800;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.link-button:hover {
+  color: var(--teal-deep);
+  border-color: transparent;
+}
+
+.evidence-summary {
+  grid-template-columns: 120px minmax(0, 1fr);
+}
+
+.evidence-timeline {
+  border-top: 1px solid var(--line-soft);
+  display: grid;
+}
+
+.evidence-timeline-item,
+.evidence-timeline-empty {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  display: grid;
+  gap: 7px;
+}
+
+.evidence-timeline-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.evidence-hash {
+  overflow-wrap: anywhere;
+}
+
+.evidence-timeline pre {
+  margin: 0;
+  padding: 10px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  color: #344054;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .privacy-list {
   margin: 0;
   padding: 10px 14px 14px;
@@ -661,6 +730,7 @@ th {
 
   .prompt-form,
   .inline-row,
+  .evidence-query-row,
   .metric-grid,
   .content-grid,
   .nav {

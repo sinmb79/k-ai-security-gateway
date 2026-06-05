@@ -5,6 +5,7 @@ const state = {
   approvals: [],
   policySummary: null,
   simulationResult: null,
+  evidencePackage: null,
   approvalUiState: {},
   approvalDraftComments: {},
 };
@@ -143,6 +144,12 @@ async function fetchPolicies() {
   return fetchJson("/v1/policies", { admin: true });
 }
 
+async function fetchEvidencePackage(requestId) {
+  return fetchJson(`/v1/reports/evidence-package/${encodeURIComponent(requestId)}`, {
+    admin: true,
+  });
+}
+
 async function resolveApproval(approvalId, approved, comment) {
   return fetchJson(`/v1/approvals/${encodeURIComponent(approvalId)}/resolve`, {
     admin: true,
@@ -164,9 +171,11 @@ async function refresh() {
     state.privacy = null;
     state.approvals = [];
     state.simulationResult = null;
+    state.evidencePackage = null;
     render();
     $("#serverStatus").textContent = "API authorization required";
     setApprovalActionStatus("Need admin token");
+    setEvidencePackageStatus("Need admin token", APPROVAL_STATUS.ERROR);
     return;
   }
   try {
@@ -186,8 +195,18 @@ async function refresh() {
     $("#serverStatus").textContent = "API reachable";
     setApprovalActionStatus("Ready");
   } catch (error) {
+    clearApprovalActionState();
+    state.events = [];
+    state.policy = null;
+    state.privacy = null;
+    state.approvals = [];
+    state.policySummary = null;
+    state.simulationResult = null;
+    state.evidencePackage = null;
+    render();
     $("#serverStatus").textContent = "API error";
     setApprovalActionStatus(`Load failed: ${error.message}`, APPROVAL_STATUS.ERROR);
+    setEvidencePackageStatus(`Load failed: ${error.message}`, APPROVAL_STATUS.ERROR);
     console.error(error);
   }
 }
@@ -218,6 +237,46 @@ function clearApproverToken() {
   syncApproverInput();
   setApprovalActionStatus("Approver token cleared", APPROVAL_STATUS.IDLE);
   renderApprovals();
+}
+
+function setEvidencePackageStatus(message, level = APPROVAL_STATUS.IDLE) {
+  const statusElement = $("#evidencePackageStatus");
+  if (!statusElement) return;
+  statusElement.textContent = message;
+  statusElement.classList.remove(
+    "status-idle",
+    "status-processing",
+    "status-success",
+    "status-error",
+  );
+  statusElement.classList.add(`status-${level}`);
+}
+
+async function loadEvidencePackage(requestId) {
+  const trimmedRequestId = String(requestId || "").trim();
+  if (!trimmedRequestId) {
+    state.evidencePackage = null;
+    setEvidencePackageStatus("요청 ID 필요", APPROVAL_STATUS.ERROR);
+    renderEvidencePackage();
+    return;
+  }
+  if (!adminToken) {
+    state.evidencePackage = null;
+    setEvidencePackageStatus("관리자 토큰 필요", APPROVAL_STATUS.ERROR);
+    renderEvidencePackage();
+    return;
+  }
+
+  $("#evidenceRequestId").value = trimmedRequestId;
+  setEvidencePackageStatus("조회 중...", APPROVAL_STATUS.PROCESSING);
+  try {
+    state.evidencePackage = await fetchEvidencePackage(trimmedRequestId);
+    setEvidencePackageStatus("조회 완료", APPROVAL_STATUS.SUCCESS);
+  } catch (error) {
+    state.evidencePackage = null;
+    setEvidencePackageStatus(`조회 실패: ${error.message}`, APPROVAL_STATUS.ERROR);
+  }
+  renderEvidencePackage();
 }
 
 function handleApprovalCommentInput(event) {
@@ -317,8 +376,34 @@ async function handlePromptSubmit(event) {
   const prompt = $("#promptInput").value.trim();
   const dataGrade = $("#dataGrade").value;
   if (!prompt || !dataGrade) return;
-  await submitPrompt(prompt, dataGrade);
-  await refresh();
+  setEvidencePackageStatus("요청 전송 중...", APPROVAL_STATUS.PROCESSING);
+  try {
+    const result = await submitPrompt(prompt, dataGrade);
+    const requestId = result.gateway_security?.request_id;
+    await refresh();
+    if (requestId) {
+      await loadEvidencePackage(requestId);
+    }
+  } catch (error) {
+    state.evidencePackage = null;
+    renderEvidencePackage();
+    $("#serverStatus").textContent = "Request failed";
+    setApprovalActionStatus(`Request failed: ${error.message}`, APPROVAL_STATUS.ERROR);
+    setEvidencePackageStatus(`요청 실패: ${error.message}`, APPROVAL_STATUS.ERROR);
+  }
+}
+
+async function handleEvidencePackageSubmit(event) {
+  event.preventDefault();
+  await loadEvidencePackage($("#evidenceRequestId").value);
+}
+
+async function handleEventTableClick(event) {
+  const button = event.target;
+  if (!(button instanceof HTMLButtonElement)) return;
+  const requestId = button.dataset.requestId;
+  if (!requestId) return;
+  await loadEvidencePackage(requestId);
 }
 
 async function handlePolicySimulateSubmit(event) {
@@ -379,16 +464,18 @@ function render() {
   renderApprovals();
   renderRouting();
   renderSimulation();
+  renderEvidencePackage();
 }
 
 function renderEvents() {
   const rows = state.events.slice(0, 12).map((event) => {
     const action = event.payload?.action || event.payload?.status || "";
     const policyId = event.payload?.policy_id || event.payload?.approval_id || "-";
+    const requestId = escapeHtml(event.request_id);
     return `<tr>
       <td>${formatTime(event.timestamp)}</td>
       <td>${escapeHtml(event.event_type)}</td>
-      <td>${escapeHtml(shortId(event.request_id))}</td>
+      <td><button type="button" class="link-button event-request-button" data-request-id="${requestId}">${escapeHtml(shortId(event.request_id))}</button></td>
       <td>${action ? actionBadge(action) : ""} <span class="muted">${escapeHtml(policyId)}</span></td>
     </tr>`;
   });
@@ -517,6 +604,67 @@ function renderSimulation() {
   $("#simulateFindings").textContent = findingRows.join("\n");
 }
 
+function renderEvidencePackage() {
+  const summary = $("#evidenceSummary");
+  const timeline = $("#evidenceTimeline");
+  if (!summary || !timeline) return;
+
+  const report = state.evidencePackage;
+  timeline.replaceChildren();
+  if (!report) {
+    summary.innerHTML = "<dt>상태</dt><dd>요청 없음</dd>";
+    return;
+  }
+
+  const chain = report.chain_verification || {};
+  const policy = report.policy_decision || {};
+  const route = report.route_decision || {};
+  const approval = report.approval || {};
+  summary.innerHTML = `
+    <dt>요청 ID</dt><dd>${escapeHtml(report.request_id || "")}</dd>
+    <dt>증거 상태</dt><dd>${escapeHtml(report.evidence_status || "")}</dd>
+    <dt>체인 검증</dt><dd>${escapeHtml(chain.status || String(report.chain_verified))} / ${escapeHtml(String(chain.event_count ?? report.event_count ?? 0))} events</dd>
+    <dt>정책</dt><dd>${actionBadge(policy.action || "unknown")} ${escapeHtml(policy.policy_id || "")}</dd>
+    <dt>라우팅</dt><dd>${escapeHtml(route.reason || JSON.stringify(route.route || null))}</dd>
+    <dt>승인</dt><dd>${escapeHtml(approval.approval_resolved?.status || approval.approval_requested?.status || "not_requested")}</dd>
+  `;
+
+  const events = Array.isArray(report.timeline) ? report.timeline : [];
+  if (events.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "evidence-timeline-empty";
+    empty.textContent = "타임라인 이벤트가 없습니다.";
+    timeline.appendChild(empty);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  events.forEach((event) => {
+    const item = document.createElement("div");
+    item.className = "evidence-timeline-item";
+
+    const header = document.createElement("div");
+    header.className = "evidence-timeline-head";
+    const title = document.createElement("strong");
+    title.textContent = `${event.event_type || "event"} / ${shortId(event.event_id)}`;
+    const time = document.createElement("span");
+    time.className = "muted";
+    time.textContent = formatTime(event.timestamp);
+    header.append(title, time);
+
+    const hashes = document.createElement("span");
+    hashes.className = "muted evidence-hash";
+    hashes.textContent = `hash ${shortId(event.event_hash)} / prev ${shortId(event.previous_hash)}`;
+
+    const payload = document.createElement("pre");
+    payload.textContent = JSON.stringify(event.payload || {}, null, 2);
+
+    item.append(header, hashes, payload);
+    fragment.appendChild(item);
+  });
+  timeline.appendChild(fragment);
+}
+
 function clearAdminToken() {
   adminToken = "";
   sessionStorage.removeItem("kaiAdminToken");
@@ -526,7 +674,9 @@ function clearAdminToken() {
   state.privacy = null;
   state.approvals = [];
   state.simulationResult = null;
+  state.evidencePackage = null;
   clearApprovalActionState();
+  renderEvidencePackage();
   refresh();
 }
 
@@ -544,11 +694,13 @@ function handleAuthSubmit(event) {
 $("#promptForm").addEventListener("submit", handlePromptSubmit);
 $("#authForm").addEventListener("submit", handleAuthSubmit);
 $("#policySimulateForm").addEventListener("submit", handlePolicySimulateSubmit);
+$("#evidencePackageForm").addEventListener("submit", handleEvidencePackageSubmit);
 $("#clearToken").addEventListener("click", clearAdminToken);
 $("#approverToken").addEventListener("input", handleApproverTokenInput);
 $("#clearApproverToken").addEventListener("click", clearApproverToken);
 $("#approvalList").addEventListener("click", handleApprovalActionClick);
 $("#approvalList").addEventListener("input", handleApprovalCommentInput);
+$("#eventRows").addEventListener("click", handleEventTableClick);
 $("#sampleMask").addEventListener("click", seedMask);
 $("#sampleApproval").addEventListener("click", seedApproval);
 $("#refresh").addEventListener("click", refresh);
@@ -556,4 +708,5 @@ $("#refresh").addEventListener("click", refresh);
 syncAuthInput();
 syncApproverInput();
 setApprovalActionStatus("Ready");
+setEvidencePackageStatus("미조회");
 refresh();
