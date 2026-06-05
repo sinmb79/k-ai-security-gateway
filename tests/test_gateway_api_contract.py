@@ -1,5 +1,6 @@
 import json
 import unittest
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -646,6 +647,106 @@ class GatewayApiContractTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.json()["detail"], "provider request failed")
+
+    def test_create_gateway_service_loads_policy_path(self) -> None:
+        old_value = os.environ.get("KAI_SECURITY_POLICY_PATH")
+        with TemporaryDirectory() as tempdir:
+            policy_file = Path(tempdir) / "policy.json"
+            policy_file.write_text(
+                '{"version":"0.2.0","policies":[{"id":"policy-001","priority":10,"when":{"data_grade":"restricted","model_zone":"external"},"action":"route_private","route_model_zone":"private","reason":"test"}]}',
+                encoding="utf-8",
+            )
+            os.environ["KAI_SECURITY_POLICY_PATH"] = str(policy_file)
+            try:
+                service = create_gateway_service()
+                self.assertEqual(service.policy_set.version, "0.2.0")
+                self.assertEqual(service.policy_set.source, str(policy_file))
+            finally:
+                if old_value is None:
+                    os.environ.pop("KAI_SECURITY_POLICY_PATH", None)
+                else:
+                    os.environ["KAI_SECURITY_POLICY_PATH"] = old_value
+
+    def test_create_gateway_service_raises_for_invalid_policy_path(self) -> None:
+        old_value = os.environ.get("KAI_SECURITY_POLICY_PATH")
+        with TemporaryDirectory() as tempdir:
+            policy_file = Path(tempdir) / "broken-policy.json"
+            policy_file.write_text("{broken json", encoding="utf-8")
+            os.environ["KAI_SECURITY_POLICY_PATH"] = str(policy_file)
+            try:
+                with self.assertRaises(ValueError):
+                    create_gateway_service()
+            finally:
+                if old_value is None:
+                    os.environ.pop("KAI_SECURITY_POLICY_PATH", None)
+                else:
+                    os.environ["KAI_SECURITY_POLICY_PATH"] = old_value
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_list_policies_requires_admin(self) -> None:
+        client = TestClient(app)
+        self.assertEqual(client.get("/v1/policies").status_code, 403)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_list_policies_returns_summary(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        client = TestClient(app)
+        service = GatewayService()
+        with patch("apps.gateway_api.main.gateway", service):
+            try:
+                response = client.get("/v1/policies", headers={"Authorization": "Bearer admin-token"})
+            finally:
+                if old_admin_tokens is None:
+                    os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+                else:
+                    os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("version", payload)
+        self.assertIn("source", payload)
+        self.assertIn("policies", payload)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_simulate_policy_requires_admin(self) -> None:
+        client = TestClient(app)
+        response = client.post(
+            "/v1/policies/simulate",
+            json={"prompt": "안전한 테스트"},
+        )
+        self.assertEqual(response.status_code, 403)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_policy_simulate_endpoint_returns_decision_without_queue_side_effect(self) -> None:
+        old_admin_tokens = os.environ.get("KAI_SECURITY_ADMIN_TOKENS")
+        os.environ["KAI_SECURITY_ADMIN_TOKENS"] = "admin-token=manager-1:admin"
+        client = TestClient(app)
+        service = GatewayService()
+        with patch("apps.gateway_api.main.gateway", service):
+            response = client.post(
+                "/v1/policies/simulate",
+                headers={"Authorization": "Bearer admin-token"},
+                json={
+                    "prompt": "confidential request",
+                    "data_grade": "restricted",
+                    "model_zone": "external",
+                    "user_id": "alice",
+                },
+            )
+        if old_admin_tokens is None:
+            os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
+        else:
+            os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_admin_tokens
+
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        self.assertEqual(result["action"], "require_approval")
+        self.assertIn("policy_id", result)
+        self.assertIn("finding_count", result)
+        self.assertIn("findings", result)
+        self.assertIn("route", result)
+        self.assertEqual(len(service.approval_queue.list_pending()), 0)
+        self.assertEqual(len(service.evidence_store.list_events()), 0)
 
 
 if __name__ == "__main__":

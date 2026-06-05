@@ -52,6 +52,21 @@ $env:KAI_SECURITY_PROVIDER_REQUEST_TIMEOUT_SECONDS = "5.0"
 Only finite positive values are accepted; invalid, zero/negative, `nan`, and `inf`
 values fall back to `5.0` seconds.
 
+## Policy Set Loader
+
+Set `KAI_SECURITY_POLICY_PATH` to a JSON-compatible YAML/JSON file to load policy rules
+for the gateway process. If the value is unset or the file is missing, the default
+policy set is used. If the configured file exists but cannot be parsed or validated,
+startup fails so policy mistakes are not hidden.
+
+The repository default policy file is available at `policies/default.yaml`.
+
+Current admin endpoints:
+
+- `GET /v1/policies` returns active policy set version, source, and summaries.
+- `POST /v1/policies/simulate` runs detection + policy decision + route computation
+  without calling any model provider or approval queue.
+
 ## Approval Tokens
 
 Approval resolution through the API requires server-side approver tokens. Configure

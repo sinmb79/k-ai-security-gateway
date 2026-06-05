@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from enum import Enum
 
 from kai_security.approval.queue import ApprovalRequest
 from kai_security.evidence.sqlite_store import SQLiteEvidenceStore
@@ -37,10 +38,14 @@ except ModuleNotFoundError:  # pragma: no cover - import guard for dependency-fr
 
 def create_gateway_service() -> GatewayService:
     db_path = os.environ.get("KAI_SECURITY_DB_PATH", "").strip()
+    policy_path = os.environ.get("KAI_SECURITY_POLICY_PATH", "").strip() or None
     if db_path:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        return GatewayService(evidence_store=SQLiteEvidenceStore(db_path))
-    return GatewayService()
+        return GatewayService(
+            evidence_store=SQLiteEvidenceStore(db_path),
+            policy_path=policy_path,
+        )
+    return GatewayService(policy_path=policy_path)
 
 
 gateway = create_gateway_service()
@@ -50,8 +55,19 @@ _STATIC_DIR = _APP_DIR / "static"
 
 
 def build_gateway_request(payload: dict[str, object]) -> GatewayRequest:
+    raw_prompt = payload.get("prompt")
+    if raw_prompt is None:
+        raw_messages = payload.get("messages")
+        if raw_messages is None:
+            raise ValueError("Request payload must contain a prompt or messages field.")
+        messages = _extract_messages(raw_messages)
+        canonical_prompt = _extract_user_visible_prompt(messages)
+        prompt = canonical_prompt
+    else:
+        prompt = str(raw_prompt)
+
     return GatewayRequest(
-        prompt=str(payload.get("prompt", "")),
+        prompt=prompt,
         user_id=str(payload.get("user_id", "anonymous")),
         department=str(payload.get("department", "unknown")),
         role=str(payload.get("role", "user")),
@@ -106,6 +122,38 @@ def evaluate_chat_completion_payload(
         )
     response["gateway_security"] = gateway_security
     return response
+
+
+def evaluate_policy_simulation_payload(
+    payload: dict[str, object],
+    service: GatewayService | None = None,
+) -> dict[str, object]:
+    service = service or gateway
+    request = build_gateway_request(payload)
+    detection, decision, _effective_prompt, route = service.simulate(request)
+    findings = [
+        {
+            "kind": finding.kind.value,
+            "label": finding.label,
+            "value": finding.value,
+            "start": finding.start,
+            "end": finding.end,
+            "confidence": finding.confidence,
+            "severity": finding.severity,
+        }
+        for finding in detection.findings
+    ]
+    return {
+        "request_id": request.request_id,
+        "action": decision.action.value,
+        "reason": decision.reason,
+        "policy_id": decision.policy_id,
+        "policy_version": decision.policy_version,
+        "risk_score": decision.risk_score,
+        "route": _route_payload(route),
+        "finding_count": len(detection.findings),
+        "findings": findings,
+    }
 
 
 def _coerce_enum(enum_type, value: object, default):
@@ -174,8 +222,11 @@ def _coerce_bool(value: object) -> bool:
     raise ValueError(f"Invalid boolean value: {value!r}")
 
 
-def _extract_messages(payload: dict[str, object]) -> list[dict[str, object]]:
-    raw_messages = payload.get("messages")
+def _extract_messages(payload: object) -> list[dict[str, object]]:
+    if isinstance(payload, dict):
+        raw_messages = payload.get("messages")
+    else:
+        raw_messages = payload
     if not isinstance(raw_messages, list):
         raise ValueError("Request payload must contain a messages list.")
     if not raw_messages:
@@ -193,6 +244,29 @@ def _extract_user_visible_prompt(messages: list[dict[str, object]]) -> str:
     if not user_messages:
         raise ValueError("Request payload must contain at least one user message.")
     return extract_chat_prompt({"messages": user_messages})
+
+
+def _serialize_policy_for_admin(policy) -> dict[str, object]:
+    when: dict[str, object] = {}
+    for condition_key, condition_value in policy.when.items():
+        if isinstance(condition_value, Enum):
+            when[condition_key] = condition_value.value
+        elif isinstance(condition_value, (list, tuple)):
+            when[condition_key] = [
+                item.value if isinstance(item, Enum) else item for item in condition_value
+            ]
+        else:
+            when[condition_key] = condition_value
+    return {
+        "id": policy.id,
+        "priority": policy.priority,
+        "action": policy.action.value,
+        "reason": policy.reason,
+        "when": when,
+        "route_model_zone": policy.route_model_zone.value
+        if policy.route_model_zone is not None
+        else None,
+    }
 
 
 def _parse_approver_tokens(raw: str) -> dict[str, tuple[str, str]]:
@@ -321,6 +395,30 @@ if FastAPI is not None:
             "approval_id": evaluation.approval_id,
             "route": _route_payload(route),
         }
+
+    @app.get("/v1/policies")
+    def list_policies(authorization: str | None = Header(default=None)) -> dict[str, object]:
+        try:
+            _require_admin(authorization=authorization)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        policy_set = gateway.policy_set
+        return {
+            "version": policy_set.version,
+            "source": policy_set.source,
+            "policy_count": len(policy_set.policies),
+            "policies": [_serialize_policy_for_admin(policy) for policy in policy_set.policies],
+        }
+
+    @app.post("/v1/policies/simulate")
+    def simulate_policy(payload: dict[str, object], authorization: str | None = Header(default=None)) -> dict[str, object]:
+        try:
+            _require_admin(authorization=authorization)
+            return evaluate_policy_simulation_payload(payload)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/v1/chat/completions")
     def chat_completions(payload: dict[str, object]) -> dict[str, object]:

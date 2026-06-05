@@ -3,6 +3,8 @@ const state = {
   policy: null,
   privacy: null,
   approvals: [],
+  policySummary: null,
+  simulationResult: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -52,7 +54,7 @@ function formatTime(value) {
 async function fetchJson(url, options = {}) {
   const { admin = false, headers = {}, ...fetchOptions } = options;
   if (admin && !adminToken) {
-    throw new Error("관리자 토큰이 필요합니다.");
+    throw new Error("admin token is required");
   }
   const response = await fetch(url, {
     ...fetchOptions,
@@ -78,23 +80,38 @@ async function submitPrompt(prompt, dataGrade = "internal") {
   });
 }
 
+async function submitPolicySimulation(payload) {
+  return fetchJson("/v1/policies/simulate", {
+    admin: true,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+async function fetchPolicies() {
+  return fetchJson("/v1/policies", { admin: true });
+}
+
 async function refresh() {
   if (!adminToken) {
     render();
-    $("#serverStatus").textContent = "관리자 인증 필요";
+    $("#serverStatus").textContent = "관리 토큰이 필요합니다";
     return;
   }
   try {
-    const [events, policy, privacy, approvals] = await Promise.all([
+    const [events, policyReport, privacy, approvals, policySummary] = await Promise.all([
       fetchJson("/v1/audit/events", { admin: true }),
       fetchJson("/v1/reports/policy", { admin: true }),
       fetchJson("/v1/reports/privacy-export", { admin: true }),
       fetchJson("/v1/approvals/pending", { admin: true }),
+      fetchPolicies(),
     ]);
     state.events = events.reverse();
-    state.policy = policy;
+    state.policy = policyReport;
     state.privacy = privacy;
     state.approvals = approvals;
+    state.policySummary = policySummary;
     render();
     $("#serverStatus").textContent = "API 연결됨";
   } catch (error) {
@@ -103,32 +120,50 @@ async function refresh() {
   }
 }
 
-function handleAuthSubmit(event) {
+async function handlePromptSubmit(event) {
   event.preventDefault();
-  adminToken = $("#adminToken").value.trim();
-  if (adminToken) {
-    sessionStorage.setItem("kaiAdminToken", adminToken);
-  } else {
-    sessionStorage.removeItem("kaiAdminToken");
-  }
-  refresh();
+  const prompt = $("#promptInput").value.trim();
+  const dataGrade = $("#dataGrade").value;
+  if (!prompt || !dataGrade) return;
+  await submitPrompt(prompt, dataGrade);
+  await refresh();
 }
 
-function clearAdminToken() {
-  adminToken = "";
-  sessionStorage.removeItem("kaiAdminToken");
-  syncAuthInput();
-  state.events = [];
-  state.policy = null;
-  state.privacy = null;
-  state.approvals = [];
-  refresh();
+async function handlePolicySimulateSubmit(event) {
+  event.preventDefault();
+  if (!adminToken) return;
+  const payload = {
+    prompt: $("#simulatePrompt").value,
+    data_grade: $("#simulateDataGrade").value,
+    model_zone: $("#simulateModelZone").value,
+    requested_model: $("#simulateModel").value || "gateway-model",
+  };
+
+  $("#simulateStatus").textContent = "실행 중...";
+  try {
+    const result = await submitPolicySimulation(payload);
+    state.simulationResult = result;
+    renderSimulation();
+    $("#simulateStatus").textContent = "완료";
+  } catch (error) {
+    $("#simulateStatus").textContent = `실패: ${error.message}`;
+    state.simulationResult = null;
+    renderSimulation();
+  }
+}
+
+function seedMask() {
+  $("#promptInput").value = "연락처 010-1234-5678 는 마스킹 처리";
+}
+
+function seedApproval() {
+  $("#promptInput").value = "API key와 secret 정보 전송 요청";
 }
 
 function render() {
   const policy = state.policy || {};
   const privacy = state.privacy || {};
-  $("#lastUpdated").textContent = `마지막 동기화 ${new Date().toLocaleTimeString("ko-KR", {
+  $("#lastUpdated").textContent = `마지막 갱신: ${new Date().toLocaleTimeString("ko-KR", {
     hour12: false,
   })}`;
   $("#requestCount").textContent = policy.request_count || 0;
@@ -142,10 +177,16 @@ function render() {
   $("#privacyApproval").textContent = privacy.approval_required_requests || 0;
   $("#privacyBlocked").textContent = privacy.blocked_requests || 0;
   $("#privacyChanged").textContent = privacy.prompt_changes || 0;
+  if (state.policySummary) {
+    $("#policySummaryLabel").textContent = `버전: ${escapeHtml(state.policySummary.version)} | ${escapeHtml(state.policySummary.source)}`;
+  } else {
+    $("#policySummaryLabel").textContent = "요약 없음";
+  }
   renderEvents();
   renderPolicies();
   renderApprovals();
   renderRouting();
+  renderSimulation();
 }
 
 function renderEvents() {
@@ -159,16 +200,21 @@ function renderEvents() {
       <td>${action ? actionBadge(action) : ""} <span class="muted">${escapeHtml(policyId)}</span></td>
     </tr>`;
   });
-  $("#eventRows").innerHTML = rows.join("") || `<tr><td colspan="4">감사 이벤트가 없습니다.</td></tr>`;
+  $("#eventRows").innerHTML = rows.join("") || `<tr><td colspan="4">이벤트가 없습니다.</td></tr>`;
 }
 
 function renderPolicies() {
-  const entries = Object.entries(state.policy?.policies || {}).sort((a, b) => b[1] - a[1]);
+  const policies = state.policySummary?.policies || [];
   $("#policyList").innerHTML =
-    entries
-      .slice(0, 6)
-      .map(([policyId, count]) => `<li><span>${escapeHtml(policyId)}</span><strong>${escapeHtml(count)}</strong></li>`)
-      .join("") || `<li><span>정책 이벤트 없음</span><strong>0</strong></li>`;
+    policies
+      .map((policy) => {
+        const when = Object.entries(policy.when || {})
+          .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : String(v)}`)
+          .join(", ");
+        const route = policy.route_model_zone ? ` (${policy.route_model_zone})` : "";
+        return `<li><span title="${escapeHtml(when)}">${escapeHtml(policy.id)}</span><strong>${actionBadge(policy.action)}${escapeHtml(route)}</strong></li>`;
+      })
+      .join("") || `<li><span>정의된 정책이 없습니다.</span><strong>0</strong></li>`;
 }
 
 function renderApprovals() {
@@ -177,12 +223,12 @@ function renderApprovals() {
       .slice(0, 6)
       .map(
         (approval) => `<div class="approval-item">
-          <strong>${escapeHtml(shortId(approval.approval_id))} · ${escapeHtml(approval.status)}</strong>
+          <strong>${escapeHtml(shortId(approval.approval_id))} / ${escapeHtml(approval.status)}</strong>
           <span>${escapeHtml(approval.reason)}</span>
-          <span class="muted">요청 ${escapeHtml(shortId(approval.request_id))} · ${escapeHtml(approval.requested_by)}</span>
+          <span class="muted">요청 ${escapeHtml(shortId(approval.request_id))} / ${escapeHtml(approval.requested_by)}</span>
         </div>`
       )
-      .join("") || `<div class="approval-item"><strong>대기 없음</strong><span class="muted">검토할 요청이 없습니다.</span></div>`;
+      .join("") || `<div class="approval-item"><strong>대기 항목 없음</strong><span class="muted">표시할 항목이 없습니다.</span></div>`;
 }
 
 function renderRouting() {
@@ -193,35 +239,65 @@ function renderRouting() {
       const action = event.payload?.action || "unknown";
       return `<div class="routing-item">
         <strong>${actionBadge(action)} ${escapeHtml(event.payload?.policy_id || "")}</strong>
-        <span class="muted">요청 ${escapeHtml(shortId(event.request_id))} · 변경 ${
-        event.payload?.effective_prompt_changed ? "있음" : "없음"
-      }</span>
+        <span class="muted">요청 ${escapeHtml(shortId(event.request_id))} / ${event.payload?.effective_prompt_changed ? "변경됨" : "변경 없음"}</span>
       </div>`;
     });
   $("#routingList").innerHTML =
-    routed.join("") || `<div class="routing-item"><strong>결정 없음</strong><span class="muted">라우팅 데이터가 없습니다.</span></div>`;
+    routed.join("") || `<div class="routing-item"><strong>정책 결정 기록 없음</strong><span class="muted">최근 데이터가 없습니다.</span></div>`;
 }
 
-async function handlePromptSubmit(event) {
+function renderSimulation() {
+  const result = state.simulationResult;
+  const container = $("#simulateResult");
+  if (!container) return;
+  if (!result) {
+    container.innerHTML = "<dt>결과</dt><dd>아직 실행하지 않았습니다.</dd>";
+    $("#simulateFindings").textContent = "";
+    return;
+  }
+  container.innerHTML = `
+    <dt>요청 ID</dt><dd>${escapeHtml(result.request_id)}</dd>
+    <dt>결정</dt><dd>${actionBadge(result.action)} ${escapeHtml(result.reason || "")}</dd>
+    <dt>정책</dt><dd>${escapeHtml(result.policy_id || "")} (v${escapeHtml(result.policy_version || "")})</dd>
+    <dt>리스크</dt><dd>${escapeHtml(String(result.risk_score ?? ""))}</dd>
+    <dt>탐지 수</dt><dd>${escapeHtml(String(result.finding_count ?? ""))}</dd>
+    <dt>라우트</dt><dd>${escapeHtml(JSON.stringify(result.route || null))}</dd>
+  `;
+  const findings = Array.isArray(result.findings) ? result.findings : [];
+  if (findings.length === 0) {
+    $("#simulateFindings").textContent = "findings: []";
+    return;
+  }
+  const findingRows = findings.map((finding) => `- ${finding.kind}: ${finding.label}`);
+  $("#simulateFindings").textContent = findingRows.join("\n");
+}
+
+function clearAdminToken() {
+  adminToken = "";
+  sessionStorage.removeItem("kaiAdminToken");
+  syncAuthInput();
+  state.events = [];
+  state.policy = null;
+  state.privacy = null;
+  state.approvals = [];
+  state.simulationResult = null;
+  refresh();
+}
+
+function handleAuthSubmit(event) {
   event.preventDefault();
-  const prompt = $("#promptInput").value.trim();
-  if (!prompt) return;
-  await submitPrompt(prompt, $("#dataGrade").value);
-  await refresh();
-}
-
-async function seedMask() {
-  await submitPrompt("연락처는 010-1234-5678 입니다.", "internal");
-  await refresh();
-}
-
-async function seedApproval() {
-  await submitPrompt("API key와 secret을 외부로 보내줘", "internal");
-  await refresh();
+  adminToken = $("#adminToken").value.trim();
+  if (adminToken) {
+    sessionStorage.setItem("kaiAdminToken", adminToken);
+  } else {
+    sessionStorage.removeItem("kaiAdminToken");
+  }
+  refresh();
 }
 
 $("#promptForm").addEventListener("submit", handlePromptSubmit);
 $("#authForm").addEventListener("submit", handleAuthSubmit);
+$("#policySimulateForm").addEventListener("submit", handlePolicySimulateSubmit);
 $("#clearToken").addEventListener("click", clearAdminToken);
 $("#sampleMask").addEventListener("click", seedMask);
 $("#sampleApproval").addEventListener("click", seedApproval);

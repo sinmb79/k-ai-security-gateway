@@ -10,43 +10,42 @@
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
-          <span class="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.6-2.9 8.7-7 10-4.1-1.3-7-5.4-7-10V6l7-3z" /><path d="M12 8v8" /><path d="M9 12h6" /></svg>
-          </span>
+          <span class="brand-mark" aria-hidden="true">K</span>
           <div>
             <strong>AI Security Gateway</strong>
-            <small>보안 운영 콘솔</small>
+            <small>관리자 대시보드</small>
           </div>
         </div>
-        <nav class="nav" aria-label="주 메뉴">
-          <a class="active" href="#overview">대시보드</a>
-          <a href="#events">AI 요청 모니터링</a>
-          <a href="#policy">정책 리포트</a>
-          <a href="#approvals">승인 관리</a>
-          <a href="#routing">모델 라우팅</a>
-          <a href="#privacy">데이터 보호</a>
+        <nav class="nav" aria-label="메인 메뉴">
+          <a class="active" href="#overview">개요</a>
+          <a href="#events">이벤트</a>
+          <a href="#policy">정책 집계</a>
+          <a href="#policy-simulate">정책 시뮬레이션</a>
+          <a href="#approvals">승인 대기</a>
+          <a href="#routing">라우팅</a>
+          <a href="#privacy">개인정보 지표</a>
           <a href="/docs">API 문서</a>
         </nav>
         <div class="sidebar-foot">
           <span class="dot"></span>
-          <span id="serverStatus">연결 확인 중</span>
+          <span id="serverStatus">API 상태 확인 중...</span>
         </div>
       </aside>
 
       <main class="main">
         <header class="topbar">
           <div>
-            <h1>대시보드</h1>
-            <p id="lastUpdated">데이터 동기화 전</p>
+            <h1>관리자 대시보드</h1>
+            <p id="lastUpdated">마지막 갱신: -</p>
           </div>
           <div class="toolbar">
             <form id="authForm" class="auth-form">
-              <input id="adminToken" type="password" autocomplete="off" placeholder="관리자 토큰" />
-              <button type="submit">인증</button>
+              <input id="adminToken" type="password" autocomplete="off" placeholder="Bearer 토큰" />
+              <button type="submit">저장</button>
               <button id="clearToken" type="button">해제</button>
             </form>
-            <button id="sampleMask" type="button">PII 테스트</button>
-            <button id="sampleApproval" type="button">반출 테스트</button>
+            <button id="sampleMask" type="button">PII 샘플</button>
+            <button id="sampleApproval" type="button">승인 샘플</button>
             <button id="refresh" type="button" class="primary">새로고침</button>
           </div>
         </header>
@@ -54,67 +53,68 @@
         <section class="status-row" id="overview">
           <div class="status-copy">
             <span class="status-dot"></span>
-            <strong>시스템 상태</strong>
-            <span>정상</span>
+            <strong>요약 상태</strong>
+            <span>실시간 요약</span>
           </div>
           <form id="promptForm" class="prompt-form">
-            <input id="promptInput" name="prompt" autocomplete="off" value="연락처는 010-1234-5678 입니다." />
+            <input id="promptInput" name="prompt" autocomplete="off" value="연락처 010-1234-5678 은닉 테스트" />
             <select id="dataGrade" name="dataGrade">
-              <option value="internal">Internal</option>
-              <option value="confidential">Confidential</option>
-              <option value="restricted">Restricted</option>
+              <option value="public">public</option>
+              <option value="internal" selected>internal</option>
+              <option value="confidential">confidential</option>
+              <option value="restricted">restricted</option>
             </select>
-            <button type="submit">평가</button>
+            <button type="submit">요청 전송</button>
           </form>
         </section>
 
-        <section class="metric-grid" aria-label="주요 지표">
+        <section class="metric-grid" aria-label="요약 메트릭">
           <article class="metric-card">
-            <span class="icon teal">↗</span>
-            <small>AI 요청 건수</small>
+            <span class="icon teal">i</span>
+            <small>요청 수</small>
             <strong id="requestCount">0</strong>
-            <em>증적 기반 집계</em>
+            <em>총 요청</em>
           </article>
           <article class="metric-card">
             <span class="icon red">!</span>
-            <small>차단 요청</small>
+            <small>차단 건수</small>
             <strong id="blockedCount">0</strong>
-            <em>정책 위반</em>
+            <em>policy block</em>
           </article>
           <article class="metric-card">
-            <span class="icon amber">∞</span>
-            <small>마스킹 응답</small>
+            <span class="icon amber">~</span>
+            <small>마스킹</small>
             <strong id="maskedCount">0</strong>
-            <em>PII 보호</em>
+            <em>PII 탐지</em>
           </article>
           <article class="metric-card">
-            <span class="icon blue">✓</span>
+            <span class="icon blue">⌑</span>
             <small>승인 필요</small>
             <strong id="approvalCount">0</strong>
-            <em>사람 검토</em>
+            <em>require_approval</em>
           </article>
           <article class="metric-card">
             <span class="icon gray">#</span>
-            <small>위험 이벤트</small>
+            <small>탐지 이벤트</small>
             <strong id="riskCount">0</strong>
-            <em>탐지 결과</em>
+            <em>risk count</em>
           </article>
         </section>
 
         <section class="content-grid">
           <article class="panel wide" id="events">
             <div class="panel-head">
-              <h2>감사 이벤트</h2>
-              <span id="eventCount">0건</span>
+              <h2>최근 이벤트</h2>
+              <span id="eventCount">0개</span>
             </div>
             <div class="table-wrap">
               <table>
                 <thead>
                   <tr>
-                    <th>시간</th>
-                    <th>이벤트</th>
-                    <th>요청 ID</th>
-                    <th>정책/조치</th>
+                    <th>시각</th>
+                    <th>유형</th>
+                    <th>요청</th>
+                    <th>정책 결과</th>
                   </tr>
                 </thead>
                 <tbody id="eventRows"></tbody>
@@ -124,23 +124,66 @@
 
           <article class="panel" id="policy">
             <div class="panel-head">
-              <h2>정책 근거 리포트</h2>
-              <span>상위 정책</span>
+              <h2>정책 집계</h2>
+              <span id="policySummaryLabel">요약 없음</span>
             </div>
             <ul id="policyList" class="policy-list"></ul>
+          </article>
+
+          <article class="panel" id="policy-simulate">
+            <div class="panel-head">
+              <h2>정책 시뮬레이션</h2>
+              <span>요청을 보내면 policy 결정만 계산</span>
+            </div>
+            <form id="policySimulateForm" class="mini-form">
+              <label>
+                <span>프롬프트</span>
+                <textarea id="simulatePrompt" rows="3" required>confidential request</textarea>
+              </label>
+              <div class="inline-row">
+                <label>
+                  <span>데이터 등급</span>
+                  <select id="simulateDataGrade">
+                    <option value="public">public</option>
+                    <option value="internal" selected>internal</option>
+                    <option value="confidential">confidential</option>
+                    <option value="restricted">restricted</option>
+                  </select>
+                </label>
+                <label>
+                  <span>모델 영역</span>
+                  <select id="simulateModelZone">
+                    <option value="external" selected>external</option>
+                    <option value="domestic_saas">domestic_saas</option>
+                    <option value="private">private</option>
+                    <option value="on_prem">on_prem</option>
+                  </select>
+                </label>
+                <label>
+                  <span>요청 모델</span>
+                  <input id="simulateModel" value="gateway-model" />
+                </label>
+              </div>
+              <div class="inline-row">
+                <button type="submit">시뮬레이션 실행</button>
+                <span id="simulateStatus" class="muted">미실행</span>
+              </div>
+            </form>
+            <dl id="simulateResult" class="result-list"></dl>
+            <pre id="simulateFindings"></pre>
           </article>
 
           <article class="panel" id="approvals">
             <div class="panel-head">
               <h2>승인 대기</h2>
-              <span id="pendingCount">0건</span>
+              <span id="pendingCount">0개</span>
             </div>
             <div id="approvalList" class="approval-list"></div>
           </article>
 
           <article class="panel" id="routing">
             <div class="panel-head">
-              <h2>모델 라우팅</h2>
+              <h2>라우팅 결과</h2>
               <span>최근 결정</span>
             </div>
             <div id="routingList" class="routing-list"></div>
@@ -148,14 +191,14 @@
 
           <article class="panel" id="privacy">
             <div class="panel-head">
-              <h2>PII/반출 점검</h2>
-              <span>초안</span>
+              <h2>PII/개인정보</h2>
+              <span>마지막 스냅샷</span>
             </div>
             <dl class="privacy-list">
-              <div><dt>마스킹 요청</dt><dd id="privacyMasked">0</dd></div>
+              <div><dt>마스킹</dt><dd id="privacyMasked">0</dd></div>
               <div><dt>승인 필요</dt><dd id="privacyApproval">0</dd></div>
-              <div><dt>차단 요청</dt><dd id="privacyBlocked">0</dd></div>
-              <div><dt>프롬프트 변경</dt><dd id="privacyChanged">0</dd></div>
+              <div><dt>차단</dt><dd id="privacyBlocked">0</dd></div>
+              <div><dt>변경 건수</dt><dd id="privacyChanged">0</dd></div>
             </dl>
           </article>
         </section>
