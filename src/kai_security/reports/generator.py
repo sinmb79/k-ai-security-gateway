@@ -96,7 +96,7 @@ _SAFE_TIMELINE_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
         "failure_domain",
         "first_failed_at",
         "last_failed_at",
-        "reason",
+        "reason_code",
         "reset_by",
         "reset_by_role",
         "auth_method",

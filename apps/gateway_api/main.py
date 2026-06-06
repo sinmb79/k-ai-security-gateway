@@ -8,6 +8,7 @@ The core MVP is dependency-free. If FastAPI is installed, run:
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import re
@@ -79,6 +80,16 @@ _MAX_STALE_EXECUTION_RECOVERIES = 100
 _STALE_EXECUTION_RECOVERY_REASONS = frozenset(
     {"execution_timeout", "process_restart", "operator_recovery"}
 )
+_RESET_EXECUTION_ERROR_REASON_CODES = frozenset(
+    {
+        "provider_config_fixed",
+        "provider_credentials_rotated",
+        "provider_endpoint_fixed",
+        "provider_quota_resolved",
+        "provider_contract_reviewed",
+    }
+)
+_MAX_RESET_REASON_COMMENT_CHARS = 200
 _STORED_CONTEXT_ERROR_KINDS = frozenset(
     {
         "missing_context",
@@ -94,6 +105,16 @@ _STORED_CONTEXT_ERROR_KINDS = frozenset(
 _APP_DIR = Path(__file__).resolve().parent
 _STATIC_DIR = _APP_DIR / "static"
 _PROVIDER_STATUS_RE = re.compile(r"provider request failed:\s+(?P<status>\d{3})")
+_RESET_REASON_COMMENT_REDACTIONS = (
+    (re.compile(r"sk-[A-Za-z0-9_-]{8,}"), "[REDACTED_SECRET]"),
+    (
+        re.compile(
+            r"(?i)\b(authorization|api[_ -]?key|token|secret|password)\b\s*[:=]\s*\S+"
+        ),
+        "[REDACTED_SECRET]",
+    ),
+    (re.compile(r"https?://[^\s]+", re.IGNORECASE), "[REDACTED_URL]"),
+)
 
 
 def build_gateway_request(payload: dict[str, object]) -> GatewayRequest:
@@ -594,11 +615,38 @@ def _append_approval_execution_failed_event(
     )
 
 
-def _approval_execution_error_reset_reason(payload: dict[str, object]) -> str:
-    reason = str(payload.get("reason", "")).strip()
-    if not reason:
-        raise ValueError("reason is required")
-    return reason
+def _redact_reset_reason_comment(comment: str) -> tuple[str, bool]:
+    redacted = comment
+    changed = False
+    for pattern, replacement in _RESET_REASON_COMMENT_REDACTIONS:
+        redacted, count = pattern.subn(replacement, redacted)
+        changed = changed or count > 0
+    return redacted, changed
+
+
+def _approval_execution_error_reset_reason(payload: dict[str, object]) -> dict[str, object]:
+    reason_code = str(payload.get("reason_code", "")).strip()
+    if not reason_code:
+        raise ValueError("reason_code is required")
+    if reason_code not in _RESET_EXECUTION_ERROR_REASON_CODES:
+        allowed = ", ".join(sorted(_RESET_EXECUTION_ERROR_REASON_CODES))
+        raise ValueError(f"reason_code must be one of: {allowed}")
+    raw_comment = str(payload.get("reason_comment", payload.get("reason", "")) or "").strip()
+    truncated = len(raw_comment) > _MAX_RESET_REASON_COMMENT_CHARS
+    bounded_comment = raw_comment[:_MAX_RESET_REASON_COMMENT_CHARS]
+    redacted_comment, redacted = _redact_reset_reason_comment(bounded_comment)
+    comment_sha256 = (
+        hashlib.sha256(redacted_comment.encode("utf-8")).hexdigest()
+        if redacted_comment
+        else None
+    )
+    return {
+        "reason_code": reason_code,
+        "reason_comment_sha256": comment_sha256,
+        "reason_comment_present": bool(redacted_comment),
+        "reason_comment_truncated": truncated,
+        "reason_comment_redacted": redacted,
+    }
 
 
 def _append_approval_execution_error_reset_event(
@@ -606,7 +654,7 @@ def _append_approval_execution_error_reset_event(
     approval: ApprovalRequest,
     previous_error_type: str | None,
     previous_retryable: bool | None,
-    reason: str,
+    reset_reason: dict[str, object],
     service: GatewayService,
     reset_by: str,
     reset_by_role: str,
@@ -633,7 +681,11 @@ def _append_approval_execution_error_reset_event(
                 "last_failed_at": approval.last_failed_at.isoformat()
                 if approval.last_failed_at
                 else None,
-                "reason": reason,
+                "reason_code": reset_reason["reason_code"],
+                "reason_comment_sha256": reset_reason["reason_comment_sha256"],
+                "reason_comment_present": reset_reason["reason_comment_present"],
+                "reason_comment_truncated": reset_reason["reason_comment_truncated"],
+                "reason_comment_redacted": reset_reason["reason_comment_redacted"],
                 "reset_by": reset_by,
                 "reset_by_role": reset_by_role,
                 "auth_method": "admin_bearer_token",
@@ -1033,6 +1085,11 @@ def _approval_payload(approval: ApprovalRequest) -> dict[str, object]:
         "last_failed_at": approval.last_failed_at.isoformat() if approval.last_failed_at else None,
         "last_execution_error": approval.last_execution_error,
         "last_execution_retryable": approval.last_execution_retryable,
+        "last_execution_reset_at": approval.last_execution_reset_at.isoformat()
+        if approval.last_execution_reset_at
+        else None,
+        "last_execution_reset_by": approval.last_execution_reset_by,
+        "last_execution_reset_reason_code": approval.last_execution_reset_reason_code,
         "retryable": approval.last_execution_retryable,
         "recommended_action": recommended_action,
         "can_resolve": can_resolve,
@@ -1230,7 +1287,7 @@ def _chain_verification_report(evidence_store: object) -> tuple[bool | None, dic
 
 
 if FastAPI is not None:
-    app = FastAPI(title="K-AI Security Gateway", version="0.1.10")
+    app = FastAPI(title="K-AI Security Gateway", version="0.1.11")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     @app.get("/")
@@ -1389,25 +1446,29 @@ if FastAPI is not None:
     ) -> dict[str, object]:
         try:
             admin_id, admin_role = _require_admin(authorization=authorization)
-            reason = _approval_execution_error_reset_reason(payload)
+            reset_reason = _approval_execution_error_reset_reason(payload)
             previous = gateway.approval_queue.get(approval_id)
             if previous is None:
                 raise KeyError(f"Approval request not found: {approval_id}")
             previous_error_type = previous.last_execution_error
             previous_retryable = previous.last_execution_retryable
-            approval = gateway.approval_queue.reset_execution_error(approval_id)
+            approval = gateway.approval_queue.reset_execution_error(
+                approval_id,
+                reset_by=admin_id,
+                reason_code=str(reset_reason["reason_code"]),
+            )
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
-            status_code = 400 if str(exc) == "reason is required" else 409
+            status_code = 400 if str(exc).startswith("reason_code") else 409
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
         _append_approval_execution_error_reset_event(
             approval=approval,
             previous_error_type=previous_error_type,
             previous_retryable=previous_retryable,
-            reason=reason,
+            reset_reason=reset_reason,
             service=gateway,
             reset_by=admin_id,
             reset_by_role=admin_role,

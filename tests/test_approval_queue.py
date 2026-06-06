@@ -195,10 +195,17 @@ class ApprovalQueueTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.queue.begin_execution(request.approval_id, resolved_by="manager-1")
 
-        reset = self.queue.reset_execution_error(request.approval_id)
+        reset = self.queue.reset_execution_error(
+            request.approval_id,
+            reset_by="admin-1",
+            reason_code="provider_config_fixed",
+        )
         self.assertEqual(reset.status, APPROVAL_STATUS_PENDING)
         self.assertEqual(reset.last_execution_error, "provider_http_error")
         self.assertTrue(reset.last_execution_retryable)
+        self.assertIsNotNone(reset.last_execution_reset_at)
+        self.assertEqual(reset.last_execution_reset_by, "admin-1")
+        self.assertEqual(reset.last_execution_reset_reason_code, "provider_config_fixed")
 
         retry = self.queue.begin_execution(request.approval_id, resolved_by="manager-1")
         self.assertEqual(retry.status, APPROVAL_STATUS_EXECUTING)
@@ -220,7 +227,11 @@ class ApprovalQueueTests(unittest.TestCase):
         )
 
         with self.assertRaises(ValueError):
-            self.queue.reset_execution_error(retryable.approval_id)
+            self.queue.reset_execution_error(
+                retryable.approval_id,
+                reset_by="admin-1",
+                reason_code="provider_config_fixed",
+            )
 
         invalid = self.queue.create(
             request_id="req-invalid-reset",
@@ -238,7 +249,34 @@ class ApprovalQueueTests(unittest.TestCase):
         )
 
         with self.assertRaises(ValueError):
-            self.queue.reset_execution_error(invalid.approval_id)
+            self.queue.reset_execution_error(
+                invalid.approval_id,
+                reset_by="admin-1",
+                reason_code="provider_config_fixed",
+            )
+
+    def test_reset_execution_error_allows_only_provider_execution_errors(self) -> None:
+        for error_type in ("gateway_runtime_error", "approval_backend_error", "future_error"):
+            request = self.queue.create(
+                request_id=f"req-{error_type}",
+                requested_by="alice",
+                reason="provider review",
+                action="require_approval",
+            )
+            executing = self.queue.begin_execution(request.approval_id, resolved_by="manager-1")
+            self.queue.fail_execution(
+                request.approval_id,
+                expected_execution_attempt_id=executing.execution_attempt_id,
+                error_type=error_type,
+                retryable=False,
+            )
+
+            with self.assertRaises(ValueError):
+                self.queue.reset_execution_error(
+                    request.approval_id,
+                    reset_by="admin-1",
+                    reason_code="provider_config_fixed",
+                )
 
     def test_non_retryable_context_failure_blocks_reexecution_but_can_be_rejected(self) -> None:
         request = self.queue.create(
