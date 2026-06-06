@@ -221,12 +221,15 @@ async function resolveApproval(approvalId, approved, comment) {
   });
 }
 
-async function resetApprovalExecutionError(approvalId, reason) {
+async function resetApprovalExecutionError(approvalId, reasonComment) {
   return fetchJson(`/v1/approvals/${encodeURIComponent(approvalId)}/reset-execution-error`, {
     admin: true,
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ reason }),
+    body: JSON.stringify({
+      reason_code: "provider_config_fixed",
+      reason_comment: reasonComment || "",
+    }),
   });
 }
 
@@ -725,6 +728,9 @@ function renderApprovals() {
     }
     if (approval.resolution_mode) {
       executionParts.push(`mode: ${approval.resolution_mode}`);
+    }
+    if (approval.last_execution_reset_reason_code) {
+      executionParts.push(`reset: ${approval.last_execution_reset_reason_code}`);
     }
     executionNotice.textContent = executionParts.join(" / ");
 

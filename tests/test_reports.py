@@ -182,6 +182,31 @@ class ReportGeneratorTests(unittest.TestCase):
                     "raw_error_body": "raw stale secret",
                 },
             ),
+            AuditEvent(
+                event_type="approval_execution_error_reset",
+                request_id="req-provider-failure",
+                timestamp=now,
+                payload={
+                    "approval_id": "approval-1",
+                    "status": "pending",
+                    "attempt_count": 1,
+                    "previous_error_type": "provider_http_error",
+                    "previous_retryable": False,
+                    "retryable": True,
+                    "failure_domain": "provider_transport",
+                    "first_failed_at": now.isoformat(),
+                    "last_failed_at": now.isoformat(),
+                    "reason_code": "provider_config_fixed",
+                    "reason_comment_sha256": "f" * 64,
+                    "reason_comment_present": True,
+                    "reason_comment_truncated": False,
+                    "reason_comment_redacted": True,
+                    "reset_by": "manager-1",
+                    "reset_by_role": "admin",
+                    "auth_method": "admin_bearer_token",
+                    "reason_comment": "raw reset comment sk-secret",
+                },
+            ),
         ]
 
         report = generate_request_evidence_package(
@@ -196,10 +221,14 @@ class ReportGeneratorTests(unittest.TestCase):
         self.assertIn("invalid_context", rendered)
         self.assertIn("invalid_messages", rendered)
         self.assertIn("approval_execution_stale_recovered", rendered)
+        self.assertIn("approval_execution_error_reset", rendered)
         self.assertIn("execution_timeout", rendered)
+        self.assertIn("provider_config_fixed", rendered)
         self.assertIn("manager-1", rendered)
         self.assertNotIn("raw secret body", rendered)
         self.assertNotIn("raw stale secret", rendered)
+        self.assertNotIn("raw reset comment", rendered)
+        self.assertNotIn("reason_comment_sha256", rendered)
 
     def test_request_evidence_package_without_events_reports_missing(self) -> None:
         report = generate_request_evidence_package([], request_id="missing-request")

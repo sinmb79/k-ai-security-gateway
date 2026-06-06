@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 from apps.gateway_api.main import (
     _approval_payload,
+    _approval_execution_error_reset_reason,
     _build_safe_provider_messages,
     _coerce_bool,
     _event_payload,
@@ -287,6 +288,35 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(summary["failure_domain"], "gateway_state")
         self.assertEqual(summary["stored_context_error_kind"], "unknown_context_error")
         self.assertFalse(summary["retryable"])
+
+    def test_reset_reason_uses_enum_and_hashes_bounded_redacted_comment(self) -> None:
+        reason = _approval_execution_error_reset_reason(
+            {
+                "reason_code": "provider_config_fixed",
+                "reason_comment": "x" * 210 + " sk-secret1234567890 https://provider.local",
+            }
+        )
+
+        self.assertEqual(reason["reason_code"], "provider_config_fixed")
+        self.assertIsInstance(reason["reason_comment_sha256"], str)
+        self.assertEqual(len(reason["reason_comment_sha256"]), 64)
+        self.assertTrue(reason["reason_comment_present"])
+        self.assertTrue(reason["reason_comment_truncated"])
+        self.assertFalse(reason["reason_comment_redacted"])
+
+        redacted = _approval_execution_error_reset_reason(
+            {
+                "reason_code": "provider_credentials_rotated",
+                "reason_comment": "authorization: Bearer abcdefghijk sk-secret1234567890",
+            }
+        )
+        self.assertTrue(redacted["reason_comment_redacted"])
+        self.assertNotIn("sk-secret1234567890", str(redacted))
+
+        with self.assertRaises(ValueError):
+            _approval_execution_error_reset_reason({"reason_comment": "free form only"})
+        with self.assertRaises(ValueError):
+            _approval_execution_error_reset_reason({"reason_code": "free_form_reason"})
 
     def test_create_gateway_service_uses_sqlite_when_db_path_is_set(self) -> None:
         import os
@@ -1297,11 +1327,11 @@ class GatewayApiContractTests(unittest.TestCase):
             )
             reset_no_auth = client.post(
                 f"/v1/approvals/{approval_id}/reset-execution-error",
-                json={"reason": "operator reset"},
+                json={"reason_code": "provider_config_fixed"},
             )
             reset_query_token = client.post(
                 f"/v1/approvals/{approval_id}/reset-execution-error?admin_token=admin-token",
-                json={"reason": "operator reset"},
+                json={"reason_code": "provider_config_fixed"},
             )
         if old_admin_tokens is None:
             os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
@@ -1601,7 +1631,10 @@ class GatewayApiContractTests(unittest.TestCase):
             reset_response = client.post(
                 f"/v1/approvals/{approval_id}/reset-execution-error",
                 headers={"Authorization": "Bearer admin-token"},
-                json={"reason": "operator inspected invalid stored context"},
+                json={
+                    "reason_code": "provider_config_fixed",
+                    "reason_comment": "operator inspected invalid stored context",
+                },
             )
             reject_response = client.post(
                 f"/v1/approvals/{approval_id}/resolve",
@@ -1750,15 +1783,30 @@ class GatewayApiContractTests(unittest.TestCase):
                 headers={"Authorization": "Bearer admin-token"},
                 json={"approval_token": "approver-token", "approved": True},
             )
-            reset_without_reason = client.post(
+            reset_without_reason_code = client.post(
                 f"/v1/approvals/{approval_id}/reset-execution-error",
                 headers={"Authorization": "Bearer admin-token"},
-                json={"reason": "   "},
+                json={"reason_comment": "rotated provider key"},
+            )
+            reset_invalid_reason_code = client.post(
+                f"/v1/approvals/{approval_id}/reset-execution-error",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"reason_code": "raw_freeform_reason"},
             )
             reset_response = client.post(
                 f"/v1/approvals/{approval_id}/reset-execution-error",
                 headers={"Authorization": "Bearer admin-token"},
-                json={"reason": "rotated provider API key"},
+                json={
+                    "reason_code": "provider_config_fixed",
+                    "reason_comment": (
+                        "rotated provider API key sk-live-secret1234567890 and "
+                        "checked https://internal.provider.local/admin"
+                    ),
+                },
+            )
+            evidence_response = client.get(
+                f"/v1/reports/evidence-package/{chat_response.json()['gateway_security']['request_id']}",
+                headers={"Authorization": "Bearer admin-token"},
             )
             retry_after_reset = client.post(
                 f"/v1/approvals/{approval_id}/resolve",
@@ -1779,14 +1827,19 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertFalse(pending_payload[0]["retryable"])
         self.assertEqual(pending_payload[0]["recommended_action"], "operator_review")
         self.assertEqual(retry_before_reset.status_code, 409)
-        self.assertEqual(reset_without_reason.status_code, 400)
+        self.assertEqual(reset_without_reason_code.status_code, 400)
+        self.assertEqual(reset_invalid_reason_code.status_code, 400)
         self.assertEqual(reset_response.status_code, 200)
         reset_payload = reset_response.json()
         self.assertTrue(reset_payload["can_resolve"])
         self.assertTrue(reset_payload["can_execute"])
         self.assertTrue(reset_payload["retryable"])
         self.assertEqual(reset_payload["last_execution_error"], "provider_http_error")
+        self.assertIsNotNone(reset_payload["last_execution_reset_at"])
+        self.assertEqual(reset_payload["last_execution_reset_by"], "manager-1")
+        self.assertEqual(reset_payload["last_execution_reset_reason_code"], "provider_config_fixed")
         self.assertEqual(reset_payload["recommended_action"], "retry")
+        self.assertEqual(evidence_response.status_code, 200)
         self.assertEqual(retry_after_reset.status_code, 200)
         self.assertEqual(retry_after_reset.json()["status"], "approved")
         self.assertEqual(
@@ -1818,9 +1871,60 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertFalse(reset_event_payload["previous_retryable"])
         self.assertTrue(reset_event_payload["retryable"])
         self.assertEqual(reset_event_payload["failure_domain"], "provider_transport")
-        self.assertEqual(reset_event_payload["reason"], "rotated provider API key")
+        self.assertEqual(reset_event_payload["reason_code"], "provider_config_fixed")
+        self.assertIsInstance(reset_event_payload["reason_comment_sha256"], str)
+        self.assertEqual(len(reset_event_payload["reason_comment_sha256"]), 64)
+        self.assertTrue(reset_event_payload["reason_comment_present"])
+        self.assertFalse(reset_event_payload["reason_comment_truncated"])
+        self.assertTrue(reset_event_payload["reason_comment_redacted"])
         self.assertEqual(reset_event_payload["reset_by"], "manager-1")
         self.assertEqual(reset_event_payload["auth_method"], "admin_bearer_token")
+        self.assertNotIn("sk-live-secret1234567890", str(reset_event_payload))
+        self.assertNotIn("internal.provider.local", str(reset_event_payload))
+        reset_timeline_payloads = [
+            entry["payload"]
+            for entry in evidence_response.json()["timeline"]
+            if entry["event_type"] == "approval_execution_error_reset"
+        ]
+        self.assertEqual(len(reset_timeline_payloads), 1)
+        self.assertEqual(reset_timeline_payloads[0]["reason_code"], "provider_config_fixed")
+        self.assertNotIn("reason_comment_sha256", reset_timeline_payloads[0])
+        self.assertNotIn("sk-live-secret1234567890", str(evidence_response.json()))
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_reset_execution_error_rejects_non_provider_failure_domains(self) -> None:
+        self._set_env("KAI_SECURITY_ADMIN_TOKENS", "admin-token=manager-1:admin")
+        service = GatewayService()
+        client = TestClient(app)
+        approval = service.approval_queue.create(
+            request_id="req-gateway-runtime",
+            requested_by="alice",
+            reason="manual runtime test",
+            action="require_approval",
+        )
+        executing = service.approval_queue.begin_execution(
+            approval.approval_id,
+            resolved_by="manager-1",
+        )
+        service.approval_queue.fail_execution(
+            approval.approval_id,
+            expected_execution_attempt_id=executing.execution_attempt_id,
+            error_type="gateway_runtime_error",
+            retryable=False,
+        )
+
+        with patch("apps.gateway_api.main.gateway", service):
+            reset_response = client.post(
+                f"/v1/approvals/{approval.approval_id}/reset-execution-error",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"reason_code": "provider_config_fixed"},
+            )
+
+        self.assertEqual(reset_response.status_code, 409)
+        stored = service.approval_queue.get(approval.approval_id)
+        self.assertIsNotNone(stored)
+        self.assertFalse(stored.last_execution_retryable)
+        self.assertIsNone(stored.last_execution_reset_at)
 
     @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
     def test_invalid_provider_response_shape_is_non_retryable(self) -> None:

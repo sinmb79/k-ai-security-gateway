@@ -23,8 +23,9 @@ Implemented:
 - Approval execution failure rollback, stale `executing` recovery, sanitized
   provider error evidence with capped body hashes, and status-aware retryability metadata
 - Admin-only non-retryable provider failure reset via
-  `POST /v1/approvals/{approval_id}/reset-execution-error`, with required reason
-  and `approval_execution_error_reset` audit evidence
+  `POST /v1/approvals/{approval_id}/reset-execution-error`, with required
+  `reason_code`, hash-only optional comments, provider-error allowlist, and
+  `approval_execution_error_reset` audit evidence
 - Post-provider attempt conflict audit evidence with structured `409` responses
   that do not mutate newer approval state
 - Non-retryable `stored_approval_context_error` handling for invalid stored approval
@@ -92,6 +93,8 @@ These are intentionally outside this MVP release candidate or deferred hardening
 - OIDC/SAML SSO and production RBAC integration
 - Persistent transactional approval backend for multi-worker or multi-replica
   deployments
+- Transactional approval-state plus audit/outbox commit for reset and execution
+  state transitions
 - Logical approval-level idempotency ledger and unknown-outcome handling separate
   from per-attempt audit IDs
 - Retention policy enforcement and encrypted raw-prompt vault separation

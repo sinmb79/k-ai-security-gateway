@@ -137,7 +137,7 @@ request. The approval remains `pending` so an authorized approver can retry afte
 the provider or network issue is fixed. Non-retryable provider failures also
 remain `pending`, but `can_resolve=false` and a direct retry returns `409` until
 an admin calls `POST /v1/approvals/{approval_id}/reset-execution-error` with a
-non-empty reason.
+valid `reason_code`.
 
 Provider raw error bodies are not copied into exception messages, API responses, or
 evidence package timelines. When a provider returns an HTTP error body, the event may
@@ -168,17 +168,31 @@ Allowed `stored_context_error_kind` values are `missing_context`,
 - `failure_domain` (same enum as `approval_execution_failed`)
 - `first_failed_at` (string or null)
 - `last_failed_at` (string or null)
-- `reason` (string, required in the reset request)
+- `reason_code` (`provider_config_fixed`, `provider_credentials_rotated`,
+  `provider_endpoint_fixed`, `provider_quota_resolved`, or
+  `provider_contract_reviewed`)
+- `reason_comment_sha256` (string or null)
+- `reason_comment_present` (boolean)
+- `reason_comment_truncated` (boolean)
+- `reason_comment_redacted` (boolean)
 - `reset_by` (string)
 - `reset_by_role` (string)
 - `auth_method` (`admin_bearer_token`)
 
 This event is emitted when an admin explicitly re-enables retry for a pending
-approval whose last provider execution failure was non-retryable. The previous
-error type remains on the approval payload for operator context, but
-`last_execution_retryable` is changed to `true`, so `can_resolve` becomes `true`
-again. Stored approval context errors in `invalid_context` are not reset by this
+approval whose last provider execution failure was non-retryable. Reset is only
+allowed for provider execution errors: `provider_http_error`, `provider_timeout`,
+`provider_invalid_response`, and `provider_runtime_error`. Gateway state,
+gateway runtime, approval backend, and unknown errors are not resettable by this
 endpoint.
+
+The reset request accepts `reason_code` and an optional `reason_comment`. The
+comment is capped at 200 characters, obvious secrets and URLs are redacted before
+hashing, and the raw comment is not written to the audit event. Request evidence
+package timelines expose `reason_code` by default, not the comment hash. The
+previous error type remains on the approval payload for operator context, but
+`last_execution_retryable` is changed to `true`, so `can_resolve` becomes `true`
+again.
 
 ### `approval_execution_stale_recovered`
 

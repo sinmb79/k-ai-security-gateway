@@ -105,7 +105,7 @@ sequenceDiagram
             M-->>GW: Provider error such as 401, 403, or 422
             GW->>Q: Keep pending and lock re-execution
             GW->>A: Append retryable=false failure evidence
-            Admin->>GW: Reset execution error with reason
+            Admin->>GW: Reset execution error with reason_code
             GW->>A: Append approval_execution_error_reset
         end
     else allowed path
@@ -290,9 +290,15 @@ audit event search, and CSV/JSONL export behavior.
   capped provider error body hash, body truncation status, and status-aware
   retryability metadata. Provider failures with `retryable=false` cannot be
   re-approved immediately; after fixing provider configuration, an admin must call
-  `POST /v1/approvals/{approval_id}/reset-execution-error` with a reason before
-  `can_resolve` opens again. The reset is recorded as
+  `POST /v1/approvals/{approval_id}/reset-execution-error` with a `reason_code`
+  before `can_resolve` opens again. The reset is recorded as
   `approval_execution_error_reset`.
+- Reset is allowed by default only for `provider_http_error`, `provider_timeout`,
+  `provider_invalid_response`, and `provider_runtime_error`. Gateway state/runtime,
+  approval backend, and unknown errors are not reopened by simple reset.
+- Optional reset comments are capped at 200 characters; obvious secrets and URLs are
+  redacted before hashing, and only a SHA-256 hash is recorded in the audit event.
+  Evidence package timelines expose `reason_code` by default.
 - Stored approval context validation failures are recorded as non-retryable
   `stored_approval_context_error` gateway state errors and do not call the provider.
   They return structured `409` details, move the approval to `invalid_context`,
@@ -332,6 +338,9 @@ See [SECURITY.md](SECURITY.md) for reporting and handling guidance.
 - Approval execution safety is single-process and in-memory in this MVP. Production
   multi-worker or multi-replica deployments need a transactional persistent approval
   backend such as SQLite/Postgres with compare-and-set state transitions.
+- Reset state changes and reset audit event appends are not yet a single transaction.
+  A production v0.2 backend should commit approval state transitions and audit/outbox
+  records together.
 - Provider idempotency keys are still attempt-scoped in the MVP. A future persistent
   execution ledger should separate logical approval idempotency from per-attempt
   audit evidence and unknown-outcome handling.

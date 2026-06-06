@@ -39,7 +39,12 @@
 - Non-retryable stored context failures must remain visible for operator review
   while blocking repeated approved execution attempts.
 - Non-retryable provider execution failures must require an explicit admin reset
-  with a reason before approved execution can be retried.
+  with an approved `reason_code` before approved execution can be retried.
+- Reset comments must not place raw secrets, URLs, provider credentials, or other
+  free-form operator text into evidence package timelines.
+- Reset must only reopen known provider execution failure types; gateway state,
+  gateway runtime, approval backend, and unknown failures require separate
+  operator remediation.
 - Operator-facing approval payloads must distinguish resolution, provider
   execution, and rejection capabilities so UI controls cannot infer the wrong
   action from a single ambiguous flag.

@@ -37,6 +37,9 @@ class ApprovalRequest:
     last_failed_at: datetime | None = None
     last_execution_error: str | None = None
     last_execution_retryable: bool | None = None
+    last_execution_reset_at: datetime | None = None
+    last_execution_reset_by: str | None = None
+    last_execution_reset_reason_code: str | None = None
     context: dict[str, object] | None = None
 
 
@@ -48,6 +51,14 @@ class InMemoryApprovalQueue:
     _status_approved: ClassVar[str] = APPROVAL_STATUS_APPROVED
     _status_rejected: ClassVar[str] = APPROVAL_STATUS_REJECTED
     _status_invalid_context: ClassVar[str] = APPROVAL_STATUS_INVALID_CONTEXT
+    _resettable_execution_errors: ClassVar[frozenset[str]] = frozenset(
+        {
+            "provider_http_error",
+            "provider_timeout",
+            "provider_invalid_response",
+            "provider_runtime_error",
+        }
+    )
 
     def __init__(self) -> None:
         self._requests: dict[str, ApprovalRequest] = {}
@@ -181,7 +192,13 @@ class InMemoryApprovalQueue:
             self._requests[approval_id] = resolved_request
             return self._copy(resolved_request)
 
-    def reset_execution_error(self, approval_id: str) -> ApprovalRequest:
+    def reset_execution_error(
+        self,
+        approval_id: str,
+        *,
+        reset_by: str,
+        reason_code: str,
+    ) -> ApprovalRequest:
         with self._lock:
             request = self._requests.get(approval_id)
             if request is None:
@@ -192,11 +209,16 @@ class InMemoryApprovalQueue:
                 raise ValueError(
                     f"Approval request has no non-retryable execution error: {approval_id}"
                 )
-            if request.last_execution_error == "stored_approval_context_error":
-                raise ValueError(f"Stored approval context errors cannot be reset: {approval_id}")
+            if request.last_execution_error not in self._resettable_execution_errors:
+                raise ValueError(
+                    f"Approval execution error is not resettable: {request.last_execution_error}"
+                )
             reset_request = replace(
                 request,
                 last_execution_retryable=True,
+                last_execution_reset_at=datetime.now(UTC),
+                last_execution_reset_by=reset_by,
+                last_execution_reset_reason_code=reason_code,
                 context=deepcopy(request.context),
             )
             self._requests[approval_id] = reset_request
