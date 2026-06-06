@@ -288,6 +288,12 @@ audit event search, and CSV/JSONL export behavior.
   They return structured `409` details, move the approval to `invalid_context`,
   expose `retryable=false` / `recommended_action=operator_review` in the admin
   approval payload, and keep the item visible for rejection or manual review.
+- Approval payloads separate operator capabilities as `can_resolve`,
+  `can_execute_provider`, `can_reject`, and `resolution_mode`; the older
+  `can_execute` field remains as a compatibility alias for `can_resolve`.
+- Approval failure evidence includes `failure_domain` values such as
+  `gateway_state`, `provider_transport`, `provider_response`, and
+  `approval_state_conflict` for cleaner SIEM/report filtering.
 - Policy-only approvals created by `/v1/security/evaluate` use an explicit
   `policy_evaluation` context, so missing or unsupported approval context no
   longer silently succeeds.

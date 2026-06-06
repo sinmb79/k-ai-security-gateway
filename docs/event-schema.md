@@ -90,6 +90,15 @@ Approval status values are `pending`, `executing`, `approved`, `rejected`, or
 The transient `executing` status is used to prevent duplicate provider calls while
 an approved request is being forwarded.
 
+Approval API payloads include operator capability hints:
+
+- `can_resolve` (boolean): approval can be approved/resolved now
+- `can_execute_provider` (boolean): approval resolution will call an upstream provider
+- `can_reject` (boolean): approval can be rejected or closed
+- `resolution_mode` (`provider_execution`, `policy_evaluation`, `invalid_context`,
+  `missing_context`, or `unsupported_context`)
+- `can_execute` (boolean): compatibility alias for `can_resolve`
+
 ### `approval_executed`
 
 - `approval_id` (string)
@@ -108,6 +117,7 @@ an approved request is being forwarded.
 - `status` (`failed`)
 - `approval_status` (`pending` or `invalid_context`)
 - `provider_name` (string, optional)
+- `failure_domain` (`gateway_state`, `provider_transport`, or `provider_response`)
 - `error_type` (`provider_timeout`, `provider_invalid_response`, `provider_http_error`,
   `provider_runtime_error`, or `stored_approval_context_error`)
 - `stored_context_error_kind` (string, optional for `stored_approval_context_error`)
@@ -135,6 +145,9 @@ Stored approval context validation failures are recorded as
 state/data errors rather than provider transport failures. They move the approval
 to `invalid_context`, return structured HTTP `409` detail with
 `action_required=operator_review`, and do not call the upstream provider.
+Allowed `stored_context_error_kind` values are `missing_context`,
+`unsupported_context_type`, `invalid_route`, `invalid_messages`,
+`invalid_provider_options`, `invalid_gateway_metadata`, and `invalid_prompt`.
 
 ### `approval_execution_stale_recovered`
 
@@ -174,6 +187,7 @@ below the default require `force=true`, and recovery reasons are restricted to
 - `current_status` (string)
 - `attempt_count` (number)
 - `reason` (string)
+- `failure_domain` (`approval_state_conflict`)
 - `retryable` (boolean, always `false`)
 
 This event is emitted when an approved execution path tries to finalize or fail an

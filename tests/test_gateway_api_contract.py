@@ -102,10 +102,29 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(payload["request_id"], "request-1")
         self.assertEqual(payload["status"], "pending")
         self.assertIsInstance(payload["created_at"], str)
-        self.assertTrue(payload["can_execute"])
+        self.assertFalse(payload["can_resolve"])
+        self.assertFalse(payload["can_execute"])
+        self.assertFalse(payload["can_execute_provider"])
+        self.assertTrue(payload["can_reject"])
+        self.assertEqual(payload["resolution_mode"], "missing_context")
         self.assertIsNone(payload["retryable"])
         self.assertIsNone(payload["recommended_action"])
         self.assertFalse(payload["has_execution_context"])
+
+        policy_payload = _approval_payload(
+            InMemoryApprovalQueue().create(
+                request_id="request-2",
+                requested_by="alice",
+                reason="policy review",
+                action="require_approval",
+                context={"type": "policy_evaluation"},
+            )
+        )
+        self.assertTrue(policy_payload["can_resolve"])
+        self.assertTrue(policy_payload["can_execute"])
+        self.assertFalse(policy_payload["can_execute_provider"])
+        self.assertTrue(policy_payload["can_reject"])
+        self.assertEqual(policy_payload["resolution_mode"], "policy_evaluation")
 
     def test_coerce_bool_rejects_ambiguous_values(self) -> None:
         self.assertTrue(_coerce_bool("true"))
@@ -1386,6 +1405,10 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(resolve_response.status_code, 200)
         resolved = resolve_response.json()
         self.assertEqual(resolved["status"], "approved")
+        self.assertEqual(resolved["resolution_mode"], "provider_execution")
+        self.assertFalse(resolved["can_resolve"])
+        self.assertFalse(resolved["can_execute_provider"])
+        self.assertFalse(resolved["can_reject"])
         self.assertIn("completion", resolved)
         self.assertEqual(
             resolved["completion"]["choices"][0]["message"]["content"],
@@ -1487,6 +1510,7 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(len(failed_events), 1)
         failed_payload = failed_events[0].payload
         self.assertEqual(failed_payload["error_type"], "provider_runtime_error")
+        self.assertEqual(failed_payload["failure_domain"], "provider_transport")
         self.assertEqual(failed_payload["provider_name"], "external-openai-compatible")
         self.assertEqual(failed_payload["attempt_count"], 1)
         self.assertTrue(failed_payload["retryable"])
@@ -1551,6 +1575,7 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(detail["error"], "stored_approval_context_error")
         self.assertEqual(detail["approval_id"], approval_id)
         self.assertEqual(detail["current_status"], "invalid_context")
+        self.assertEqual(detail["failure_domain"], "gateway_state")
         self.assertEqual(detail["stored_context_error_kind"], "invalid_messages")
         self.assertFalse(detail["retryable"])
         self.assertEqual(detail["action_required"], "operator_review")
@@ -1564,7 +1589,11 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(len(pending_payload), 1)
         self.assertEqual(pending_payload[0]["status"], "invalid_context")
         self.assertFalse(pending_payload[0]["retryable"])
+        self.assertFalse(pending_payload[0]["can_resolve"])
         self.assertFalse(pending_payload[0]["can_execute"])
+        self.assertFalse(pending_payload[0]["can_execute_provider"])
+        self.assertTrue(pending_payload[0]["can_reject"])
+        self.assertEqual(pending_payload[0]["resolution_mode"], "invalid_context")
         self.assertEqual(pending_payload[0]["recommended_action"], "operator_review")
         self.assertEqual(retry_response.status_code, 409)
         self.assertEqual(reject_response.status_code, 200)
@@ -1576,6 +1605,7 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(len(failed_events), 1)
         failed_payload = failed_events[0].payload
         self.assertEqual(failed_payload["error_type"], "stored_approval_context_error")
+        self.assertEqual(failed_payload["failure_domain"], "gateway_state")
         self.assertEqual(failed_payload["stored_context_error_kind"], "invalid_messages")
         self.assertEqual(failed_payload["approval_status"], "invalid_context")
         self.assertFalse(failed_payload["retryable"])
@@ -1613,6 +1643,7 @@ class GatewayApiContractTests(unittest.TestCase):
             self.assertEqual(response.status_code, 409)
             detail = response.json()["detail"]
             self.assertEqual(detail["error"], "stored_approval_context_error")
+            self.assertEqual(detail["failure_domain"], "gateway_state")
             self.assertEqual(detail["stored_context_error_kind"], expected_kind)
             self.assertEqual(detail["current_status"], "invalid_context")
             self.assertFalse(detail["retryable"])
@@ -1669,6 +1700,7 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(len(failed_events), 1)
         failed_payload = failed_events[0].payload
         self.assertEqual(failed_payload["error_type"], "provider_http_error")
+        self.assertEqual(failed_payload["failure_domain"], "provider_transport")
         self.assertEqual(failed_payload["provider_status_code"], 401)
         self.assertFalse(failed_payload["retryable"])
         self.assertEqual(failed_payload["provider_error_body_sha256"], "abc123")
@@ -1713,6 +1745,7 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(len(failed_events), 1)
         failed_payload = failed_events[0].payload
         self.assertEqual(failed_payload["error_type"], "provider_invalid_response")
+        self.assertEqual(failed_payload["failure_domain"], "provider_response")
         self.assertFalse(failed_payload["retryable"])
 
     @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
@@ -1946,6 +1979,7 @@ class GatewayApiContractTests(unittest.TestCase):
         conflict_payload = conflict_events[0].payload
         self.assertEqual(conflict_payload["approval_id"], approval_id)
         self.assertEqual(conflict_payload["status"], "conflict")
+        self.assertEqual(conflict_payload["failure_domain"], "approval_state_conflict")
         self.assertEqual(conflict_payload["expected_execution_attempt_id"], provider_attempts[0])
         self.assertEqual(conflict_payload["current_execution_attempt_id"], provider_attempts[1])
         self.assertEqual(conflict_payload["current_status"], "approved")
