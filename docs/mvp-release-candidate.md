@@ -22,6 +22,10 @@ Implemented:
   attempt-aware `pending -> executing -> approved` execution state transitions
 - Approval execution failure rollback, stale `executing` recovery, sanitized
   provider error evidence with capped body hashes, and status-aware retryability metadata
+- Post-provider attempt conflict audit evidence with structured `409` responses
+  that do not mutate newer approval state
+- Non-retryable `stored_approval_context_error` handling for invalid stored approval
+  context before any provider call
 - Tamper-evident audit evidence store with in-memory and SQLite backends
 - Request-level evidence package reports with hash-chain verification metadata
 - Response guard for model outputs, including PII masking and secret blocking

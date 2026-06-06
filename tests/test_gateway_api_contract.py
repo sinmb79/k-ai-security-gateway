@@ -1488,6 +1488,60 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertNotIn("temporary upstream failure", str(failed_payload))
 
     @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_stored_approval_context_error_is_non_retryable_and_does_not_call_provider(self) -> None:
+        self._set_env("KAI_SECURITY_ADMIN_TOKENS", "admin-token=manager-1:admin")
+        self._set_env("KAI_SECURITY_APPROVER_TOKENS", "approver-token=approver-1:security_manager")
+        service = GatewayService()
+        client = TestClient(app)
+        adapter = Mock()
+
+        with (
+            patch("apps.gateway_api.main.gateway", service),
+            patch("apps.gateway_api.main.resolve_provider_adapter", return_value=adapter),
+        ):
+            chat_response = client.post(
+                "/v1/chat/completions",
+                headers=self._client_headers(),
+                json={
+                    "model": "gateway-test",
+                    "data_grade": "restricted",
+                    "model_zone": "external",
+                    "messages": [{"role": "user", "content": "normal business review"}],
+                },
+            )
+            approval_id = chat_response.json()["gateway_security"]["approval_id"]
+            stored = service.approval_queue.get(approval_id)
+            self.assertIsNotNone(stored)
+            corrupted_context = dict(stored.context or {})
+            corrupted_context["messages"] = "not-a-message-list"
+            service.approval_queue._requests[approval_id] = replace(
+                service.approval_queue._requests[approval_id],
+                context=corrupted_context,
+            )
+
+            resolve_response = client.post(
+                f"/v1/approvals/{approval_id}/resolve",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"approval_token": "approver-token", "approved": True},
+            )
+
+        self.assertEqual(resolve_response.status_code, 502)
+        adapter.complete.assert_not_called()
+        stored_after_failure = service.approval_queue.get(approval_id)
+        self.assertIsNotNone(stored_after_failure)
+        self.assertEqual(stored_after_failure.status, "pending")
+        self.assertEqual(stored_after_failure.last_execution_error, "stored_approval_context_error")
+        failed_events = service.evidence_store.list_events(
+            request_id=chat_response.json()["gateway_security"]["request_id"],
+            event_type="approval_execution_failed",
+        )
+        self.assertEqual(len(failed_events), 1)
+        failed_payload = failed_events[0].payload
+        self.assertEqual(failed_payload["error_type"], "stored_approval_context_error")
+        self.assertFalse(failed_payload["retryable"])
+        self.assertEqual(failed_payload["status"], "failed")
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
     def test_provider_error_records_retryability_without_raw_body(self) -> None:
         self._set_env("KAI_SECURITY_ADMIN_TOKENS", "admin-token=manager-1:admin")
         self._set_env("KAI_SECURITY_APPROVER_TOKENS", "approver-token=approver-1:security_manager")
@@ -1779,6 +1833,11 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(retry.status_code, 200)
         self.assertEqual(len(first_response), 1)
         self.assertEqual(first_response[0].status_code, 409)
+        conflict_detail = first_response[0].json()["detail"]
+        self.assertEqual(conflict_detail["error"], "approval execution attempt changed")
+        self.assertEqual(conflict_detail["expected_execution_attempt_id"], provider_attempts[0])
+        self.assertEqual(conflict_detail["current_execution_attempt_id"], provider_attempts[1])
+        self.assertEqual(conflict_detail["current_status"], "approved")
         self.assertEqual(retry.json()["status"], "approved")
         self.assertEqual(
             retry.json()["completion"]["choices"][0]["message"]["content"],
@@ -1797,6 +1856,19 @@ class GatewayApiContractTests(unittest.TestCase):
         ]
         self.assertEqual(event_types.count("approval_executed"), 1)
         self.assertIn("approval_execution_stale_recovered", event_types)
+        self.assertEqual(event_types.count("approval_execution_attempt_conflict"), 1)
+        conflict_events = service.evidence_store.list_events(
+            request_id=chat_response.json()["gateway_security"]["request_id"],
+            event_type="approval_execution_attempt_conflict",
+        )
+        self.assertEqual(len(conflict_events), 1)
+        conflict_payload = conflict_events[0].payload
+        self.assertEqual(conflict_payload["approval_id"], approval_id)
+        self.assertEqual(conflict_payload["status"], "conflict")
+        self.assertEqual(conflict_payload["expected_execution_attempt_id"], provider_attempts[0])
+        self.assertEqual(conflict_payload["current_execution_attempt_id"], provider_attempts[1])
+        self.assertEqual(conflict_payload["current_status"], "approved")
+        self.assertFalse(conflict_payload["retryable"])
 
     @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
     def test_concurrent_approval_execution_calls_provider_once(self) -> None:
