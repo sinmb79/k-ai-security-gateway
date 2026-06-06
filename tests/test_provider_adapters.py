@@ -1,10 +1,13 @@
 import json
 import unittest
+from io import BytesIO
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from kai_security.model_router import ModelRoute
 from kai_security.models import ModelZone
 from kai_security.providers import _coerce_timeout_seconds, iterate_provider_env_names, resolve_provider_adapter
+from kai_security.providers.errors import ProviderError
 from kai_security.providers.echo import EchoChatCompletionAdapter
 from kai_security.providers.openai_compatible import (
     OpenAICompatibleHTTPAdapter,
@@ -262,6 +265,58 @@ class ProviderAdapterTests(unittest.TestCase):
             )
 
         self.assertEqual(str(context.exception), "provider response has invalid JSON shape")
+        self.assertIsInstance(context.exception, ProviderError)
+        self.assertFalse(context.exception.retryable)
+
+    @patch("kai_security.providers.openai_compatible.urlopen")
+    def test_openai_adapter_http_error_uses_safe_provider_error(self, mock_urlopen) -> None:
+        mock_urlopen.side_effect = HTTPError(
+            url="https://provider.local/v1/chat/completions",
+            code=401,
+            msg="Unauthorized",
+            hdrs={},
+            fp=BytesIO(b'{"error":"raw secret body"}'),
+        )
+        adapter = OpenAICompatibleHTTPAdapter(endpoint="https://provider.local", api_key="secret")
+
+        with self.assertRaises(ProviderError) as context:
+            adapter.complete(
+                request_id="req-1",
+                model="mock-model",
+                messages=[{"role": "user", "content": "hello"}],
+                effective_prompt="hello",
+                gateway_security={"action": "allow"},
+            )
+
+        self.assertEqual(context.exception.error_type, "provider_http_error")
+        self.assertEqual(context.exception.status_code, 401)
+        self.assertFalse(context.exception.retryable)
+        self.assertIn("HTTP 401", str(context.exception))
+        self.assertNotIn("raw secret body", str(context.exception))
+        self.assertIsNotNone(context.exception.body_sha256)
+
+    @patch("kai_security.providers.openai_compatible.urlopen")
+    def test_openai_adapter_http_503_is_retryable(self, mock_urlopen) -> None:
+        mock_urlopen.side_effect = HTTPError(
+            url="https://provider.local/v1/chat/completions",
+            code=503,
+            msg="Unavailable",
+            hdrs={},
+            fp=BytesIO(b"temporary outage"),
+        )
+        adapter = OpenAICompatibleHTTPAdapter(endpoint="https://provider.local", api_key="secret")
+
+        with self.assertRaises(ProviderError) as context:
+            adapter.complete(
+                request_id="req-1",
+                model="mock-model",
+                messages=[{"role": "user", "content": "hello"}],
+                effective_prompt="hello",
+                gateway_security={"action": "allow"},
+            )
+
+        self.assertEqual(context.exception.status_code, 503)
+        self.assertTrue(context.exception.retryable)
 
     def test_resolver_timeout_defaults_to_5_seconds_on_invalid_inputs(self) -> None:
         self.assertEqual(_coerce_timeout_seconds(""), 5.0)

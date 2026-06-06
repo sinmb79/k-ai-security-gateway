@@ -2,7 +2,7 @@ import json
 import unittest
 import os
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
@@ -27,6 +27,7 @@ from kai_security.approval.queue import InMemoryApprovalQueue
 from kai_security.gateway.service import GatewayService
 from kai_security.model_router import choose_route
 from kai_security.models import AuditEvent, DataGrade, ModelZone
+from kai_security.providers.errors import ProviderError
 
 try:
     from fastapi.testclient import TestClient
@@ -1485,6 +1486,109 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertTrue(failed_payload["retryable"])
         self.assertIn("execution_attempt_id", failed_payload)
         self.assertNotIn("temporary upstream failure", str(failed_payload))
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_provider_error_records_retryability_without_raw_body(self) -> None:
+        self._set_env("KAI_SECURITY_ADMIN_TOKENS", "admin-token=manager-1:admin")
+        self._set_env("KAI_SECURITY_APPROVER_TOKENS", "approver-token=approver-1:security_manager")
+        service = GatewayService()
+        client = TestClient(app)
+        adapter = Mock()
+        adapter.complete.side_effect = ProviderError(
+            error_type="provider_http_error",
+            status_code=401,
+            retryable=False,
+            safe_message="provider request failed with HTTP 401",
+            body_sha256="abc123",
+        )
+
+        with (
+            patch("apps.gateway_api.main.gateway", service),
+            patch("apps.gateway_api.main.resolve_provider_adapter", return_value=adapter),
+        ):
+            chat_response = client.post(
+                "/v1/chat/completions",
+                headers=self._client_headers(),
+                json={
+                    "model": "gateway-test",
+                    "data_grade": "restricted",
+                    "model_zone": "external",
+                    "messages": [{"role": "user", "content": "normal business review"}],
+                },
+            )
+            approval_id = chat_response.json()["gateway_security"]["approval_id"]
+            resolve_response = client.post(
+                f"/v1/approvals/{approval_id}/resolve",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"approval_token": "approver-token", "approved": True},
+            )
+
+        self.assertEqual(resolve_response.status_code, 502)
+        stored = service.approval_queue.get(approval_id)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.status, "pending")
+        failed_events = service.evidence_store.list_events(
+            request_id=chat_response.json()["gateway_security"]["request_id"],
+            event_type="approval_execution_failed",
+        )
+        self.assertEqual(len(failed_events), 1)
+        failed_payload = failed_events[0].payload
+        self.assertEqual(failed_payload["error_type"], "provider_http_error")
+        self.assertEqual(failed_payload["provider_status_code"], 401)
+        self.assertFalse(failed_payload["retryable"])
+        self.assertEqual(failed_payload["provider_error_body_sha256"], "abc123")
+        self.assertNotIn("raw secret body", str(failed_payload))
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_recover_stale_approval_execution_returns_pending_and_records_event(self) -> None:
+        self._set_env("KAI_SECURITY_ADMIN_TOKENS", "admin-token=manager-1:admin")
+        service = GatewayService()
+        client = TestClient(app)
+        approval = service.approval_queue.create(
+            request_id="req-stale-execution",
+            requested_by="alice",
+            reason="external restricted data requires approval",
+            action="require_approval",
+        )
+        executing = service.approval_queue.begin_execution(
+            approval.approval_id,
+            resolved_by="manager-1",
+        )
+        stale_started_at = datetime.now(UTC) - timedelta(seconds=600)
+        service.approval_queue._requests[approval.approval_id] = replace(
+            service.approval_queue._requests[approval.approval_id],
+            execution_started_at=stale_started_at,
+            last_execution_started_at=stale_started_at,
+        )
+
+        with patch("apps.gateway_api.main.gateway", service):
+            response = client.post(
+                "/v1/approvals/recover-stale",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"timeout_seconds": 300, "reason": "execution_timeout"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["recovered_count"], 1)
+        self.assertEqual(payload["approvals"][0]["approval_id"], approval.approval_id)
+        self.assertEqual(payload["approvals"][0]["status"], "pending")
+        self.assertEqual(payload["approvals"][0]["execution_attempt_id"], executing.execution_attempt_id)
+        stored = service.approval_queue.get(approval.approval_id)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.status, "pending")
+        self.assertEqual(len(service.approval_queue.list_pending()), 1)
+        recovered_events = service.evidence_store.list_events(
+            request_id="req-stale-execution",
+            event_type="approval_execution_stale_recovered",
+        )
+        self.assertEqual(len(recovered_events), 1)
+        recovered_payload = recovered_events[0].payload
+        self.assertEqual(recovered_payload["stale_execution_attempt_id"], executing.execution_attempt_id)
+        self.assertEqual(recovered_payload["reason"], "execution_timeout")
+        self.assertTrue(recovered_payload["retryable"])
+        self.assertIsNotNone(recovered_payload["execution_started_at"])
+        self.assertIsNotNone(recovered_payload["recovered_at"])
 
     @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
     def test_concurrent_approval_execution_calls_provider_once(self) -> None:

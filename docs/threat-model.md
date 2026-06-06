@@ -26,8 +26,20 @@
 - Every evaluated request creates audit events.
 - Policy decisions must be reproducible by request, detection result, and policy version.
 - Restricted data must not be sent to external model zones without approval.
+- Approved restricted requests must only be marked `approved` after the stored
+  safe request context has executed successfully.
+- Provider raw error bodies must not be copied into API responses, exception
+  messages, or evidence package timelines.
 - High-risk document/RAG hidden instructions must require approval before
   external model routing.
 - Raw prompt retention must be configurable and minimized.
 - Audit events must be tamper-evident.
+
+## MVP Boundaries
+
+- Approval execution locking is in-memory and process-local. Multi-worker or
+  multi-replica deployments require a persistent transactional approval backend.
+- Provider idempotency keys are attempt-scoped in the MVP. Production hardening
+  should add a logical approval-level execution ledger and unknown-outcome
+  handling.
 

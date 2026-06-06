@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+from hashlib import sha256
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+from kai_security.providers.errors import ProviderError, retryable_for_status
 
 
 class OpenAICompatibleHTTPAdapter:
@@ -89,17 +92,37 @@ def _post_chat_completion(
         with urlopen(request, timeout=timeout_seconds) as response:
             raw = response.read().decode("utf-8")
     except HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="ignore") if getattr(exc, "read", None) else ""
-        raise RuntimeError(f"provider request failed: {exc.code} {error_body}") from exc
+        error_body = exc.read() if getattr(exc, "read", None) else b""
+        raise ProviderError(
+            error_type="provider_http_error",
+            status_code=exc.code,
+            retryable=retryable_for_status(exc.code),
+            safe_message=f"provider request failed with HTTP {exc.code}",
+            body_sha256=sha256(error_body).hexdigest() if error_body else None,
+        ) from exc
     except (URLError, TimeoutError) as exc:
-        raise RuntimeError(f"provider request failed: {exc}") from exc
+        message = str(exc).lower()
+        error_type = "provider_timeout" if "timed out" in message or "timeout" in message else "provider_network_error"
+        raise ProviderError(
+            error_type=error_type,
+            retryable=True,
+            safe_message=f"provider request failed: {error_type}",
+        ) from exc
 
     try:
         body = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise RuntimeError("provider response has invalid JSON shape") from exc
+        raise ProviderError(
+            error_type="provider_invalid_response",
+            retryable=False,
+            safe_message="provider response has invalid JSON shape",
+        ) from exc
     if not isinstance(body, dict):
-        raise RuntimeError("provider response has invalid JSON shape")
+        raise ProviderError(
+            error_type="provider_invalid_response",
+            retryable=False,
+            safe_message="provider response has invalid JSON shape",
+        )
     return body
 
 

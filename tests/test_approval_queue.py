@@ -1,6 +1,7 @@
 import unittest
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
+from datetime import UTC, datetime, timedelta
 
 from kai_security.approval.queue import (
     APPROVAL_STATUS_APPROVED,
@@ -34,7 +35,7 @@ class ApprovalQueueTests(unittest.TestCase):
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0].approval_id, request.approval_id)
 
-    def test_list_pending_and_resolve(self) -> None:
+    def test_list_pending_and_finish_execution_success(self) -> None:
         first = self.queue.create(
             request_id="req-001",
             requested_by="alice",
@@ -50,9 +51,13 @@ class ApprovalQueueTests(unittest.TestCase):
 
         self.assertEqual(len(self.queue.list_pending()), 2)
 
-        approved = self.queue.resolve(
-            approval_id=first.approval_id,
-            approved=True,
+        executing = self.queue.begin_execution(
+            first.approval_id,
+            resolved_by="manager",
+            comment="approved",
+        )
+        approved = self.queue.finish_execution_success(
+            executing.approval_id,
             resolved_by="manager",
             comment="approved",
         )
@@ -71,9 +76,8 @@ class ApprovalQueueTests(unittest.TestCase):
             reason="policy risk",
             action="external_action",
         )
-        rejected = self.queue.resolve(
-            approval_id=request.approval_id,
-            approved=False,
+        rejected = self.queue.reject_pending(
+            request.approval_id,
             resolved_by="security",
             comment="rejected_by_policy",
         )
@@ -89,14 +93,30 @@ class ApprovalQueueTests(unittest.TestCase):
             reason="one-pass",
             action="route_external",
         )
-        self.queue.resolve(request.approval_id, approved=True, resolved_by="manager")
+        executing = self.queue.begin_execution(request.approval_id, resolved_by="manager")
+        self.queue.finish_execution_success(executing.approval_id, resolved_by="manager")
 
         with self.assertRaises(ValueError):
-            self.queue.resolve(request.approval_id, approved=False, resolved_by="manager")
+            self.queue.reject_pending(request.approval_id, resolved_by="manager")
 
         current = self.queue.get(request.approval_id)
         self.assertIsNotNone(current)
         self.assertEqual(current.status, APPROVAL_STATUS_APPROVED)
+
+    def test_resolve_does_not_allow_pending_direct_approve(self) -> None:
+        request = self.queue.create(
+            request_id="req-direct",
+            requested_by="alice",
+            reason="must execute first",
+            action="require_approval",
+        )
+
+        with self.assertRaises(ValueError):
+            self.queue.resolve(request.approval_id, approved=True, resolved_by="manager")
+
+        current = self.queue.get(request.approval_id)
+        self.assertIsNotNone(current)
+        self.assertEqual(current.status, APPROVAL_STATUS_PENDING)
 
     def test_execution_state_blocks_duplicate_execution_and_can_retry_after_failure(self) -> None:
         request = self.queue.create(
@@ -135,6 +155,38 @@ class ApprovalQueueTests(unittest.TestCase):
         self.assertEqual(retry.status, APPROVAL_STATUS_EXECUTING)
         self.assertEqual(retry.attempt_count, 2)
         self.assertNotEqual(retry.execution_attempt_id, executing.execution_attempt_id)
+
+        approved = self.queue.finish_execution_success(retry.approval_id, resolved_by="manager-1")
+        self.assertEqual(approved.status, APPROVAL_STATUS_APPROVED)
+        self.assertIsNone(approved.execution_started_at)
+        self.assertIsNone(approved.last_execution_error)
+
+    def test_recover_stale_executions_returns_old_executing_requests_to_pending(self) -> None:
+        request = self.queue.create(
+            request_id="req-stale",
+            requested_by="alice",
+            reason="provider review",
+            action="require_approval",
+        )
+        executing = self.queue.begin_execution(request.approval_id, resolved_by="manager-1")
+        now = datetime.now(UTC)
+        stale_started_at = now - timedelta(seconds=600)
+        self.queue._requests[request.approval_id] = replace(
+            self.queue._requests[request.approval_id],
+            execution_started_at=stale_started_at,
+            last_execution_started_at=stale_started_at,
+        )
+
+        recovered = self.queue.recover_stale_executions(timeout_seconds=300, now=now)
+
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(recovered[0].approval_id, request.approval_id)
+        self.assertEqual(recovered[0].status, APPROVAL_STATUS_PENDING)
+        self.assertEqual(recovered[0].execution_attempt_id, executing.execution_attempt_id)
+        self.assertEqual(recovered[0].last_execution_started_at, stale_started_at)
+        self.assertIsNone(recovered[0].execution_started_at)
+        self.assertEqual(recovered[0].last_execution_error, "execution_timeout")
+        self.assertEqual(len(self.queue.list_pending()), 1)
 
     def test_defensive_copy_on_returned_objects(self) -> None:
         request = self.queue.create(
