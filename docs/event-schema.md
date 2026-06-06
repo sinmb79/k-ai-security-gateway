@@ -89,12 +89,18 @@ must describe the decision reason in human-readable text.
 - `route` (object)
 - `status` (`executed`)
 - `response_guard` (object, optional)
+- `delivery.mode` (`approval_resolve_response`)
+- `delivery.original_client_callback` (boolean, currently `false`)
 
 ### `approval_execution_failed`
 
 - `approval_id` (string)
 - `route` (object)
 - `status` (`failed`)
+
+Provider execution failures do not resolve or consume the approval request. The
+approval remains `pending` so an authorized approver can retry after the provider
+or network issue is fixed.
 
 ### `response_analyzed`
 

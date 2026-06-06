@@ -1383,6 +1383,8 @@ class GatewayApiContractTests(unittest.TestCase):
             resolved["completion"]["choices"][0]["message"]["content"],
             "approved provider response",
         )
+        self.assertEqual(resolved["completion_delivery"]["mode"], "approval_resolve_response")
+        self.assertFalse(resolved["completion_delivery"]["original_client_callback"])
         called_payload = adapter.complete.call_args.kwargs
         self.assertEqual(called_payload["model"], "gateway-test")
         self.assertEqual(called_payload["provider_options"], {"temperature": 0.1})
@@ -1395,6 +1397,78 @@ class GatewayApiContractTests(unittest.TestCase):
         ]
         self.assertIn("approval_resolved", event_types)
         self.assertIn("response_analyzed", event_types)
+        self.assertIn("approval_executed", event_types)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_approval_provider_failure_keeps_request_pending_for_retry(self) -> None:
+        self._set_env("KAI_SECURITY_ADMIN_TOKENS", "admin-token=manager-1:admin")
+        self._set_env("KAI_SECURITY_APPROVER_TOKENS", "approver-token=approver-1:security_manager")
+        service = GatewayService()
+        client = TestClient(app)
+        adapter = Mock()
+        adapter.complete.side_effect = [
+            RuntimeError("temporary upstream failure"),
+            {
+                "id": "adapter-retry-1",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "retry provider response"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        ]
+
+        with (
+            patch("apps.gateway_api.main.gateway", service),
+            patch("apps.gateway_api.main.resolve_provider_adapter", return_value=adapter),
+        ):
+            chat_response = client.post(
+                "/v1/chat/completions",
+                headers=self._client_headers(),
+                json={
+                    "model": "gateway-test",
+                    "data_grade": "restricted",
+                    "model_zone": "external",
+                    "messages": [{"role": "user", "content": "normal business review"}],
+                },
+            )
+            approval_id = chat_response.json()["gateway_security"]["approval_id"]
+            first = client.post(
+                f"/v1/approvals/{approval_id}/resolve",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"approval_token": "approver-token", "approved": True},
+            )
+            stored_after_failure = service.approval_queue.get(approval_id)
+            pending_after_failure = service.approval_queue.list_pending()
+            retry = client.post(
+                f"/v1/approvals/{approval_id}/resolve",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"approval_token": "approver-token", "approved": True},
+            )
+
+        self.assertEqual(first.status_code, 502)
+        self.assertIsNotNone(stored_after_failure)
+        self.assertEqual(stored_after_failure.status, "pending")
+        self.assertEqual(len(pending_after_failure), 1)
+        self.assertEqual(pending_after_failure[0].approval_id, approval_id)
+        self.assertEqual(retry.status_code, 200)
+        self.assertEqual(retry.json()["status"], "approved")
+        self.assertEqual(
+            retry.json()["completion"]["choices"][0]["message"]["content"],
+            "retry provider response",
+        )
+        self.assertEqual(adapter.complete.call_count, 2)
+        event_types = [
+            event.event_type
+            for event in service.evidence_store.list_events(
+                request_id=chat_response.json()["gateway_security"]["request_id"]
+            )
+        ]
+        self.assertIn("approval_execution_failed", event_types)
+        self.assertIn("approval_resolved", event_types)
         self.assertIn("approval_executed", event_types)
 
     @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")

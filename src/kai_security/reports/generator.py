@@ -57,7 +57,7 @@ _SAFE_TIMELINE_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
         "resolved_at",
         "approver_role",
     ),
-    "approval_executed": ("approval_id", "route", "status", "response_guard"),
+    "approval_executed": ("approval_id", "route", "status", "response_guard", "delivery"),
     "approval_execution_failed": ("approval_id", "route", "status"),
     "request_finalized": ("action", "effective_prompt_changed"),
 }

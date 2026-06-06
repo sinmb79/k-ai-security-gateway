@@ -6,6 +6,7 @@ const state = {
   policySummary: null,
   simulationResult: null,
   evidencePackage: null,
+  lastApprovalCompletion: null,
   approvalUiState: {},
   approvalDraftComments: {},
   eventFilters: {
@@ -107,6 +108,12 @@ function clearApprovalActionState(approvalId) {
     return;
   }
   state.approvalUiState = {};
+}
+
+function extractCompletionContent(completion) {
+  const choice = completion?.choices?.[0];
+  const content = choice?.message?.content;
+  return typeof content === "string" ? content : "";
 }
 
 async function fetchJson(url, options = {}) {
@@ -223,6 +230,7 @@ async function refresh() {
     state.approvals = [];
     state.simulationResult = null;
     state.evidencePackage = null;
+    state.lastApprovalCompletion = null;
     render();
     $("#serverStatus").textContent = "API authorization required";
     $("#eventFilterStatus").textContent = "관리자 토큰 필요";
@@ -256,6 +264,7 @@ async function refresh() {
     state.policySummary = null;
     state.simulationResult = null;
     state.evidencePackage = null;
+    state.lastApprovalCompletion = null;
     render();
     $("#serverStatus").textContent = "API error";
     $("#eventFilterStatus").textContent = `검색 실패: ${error.message}`;
@@ -394,8 +403,21 @@ async function handleApprovalActionClick(event) {
   }
 
   try {
-    await resolveApproval(approvalId, approved, comment);
-    const successMessage = approved ? "승인 처리 완료" : "반려 처리 완료";
+    const result = await resolveApproval(approvalId, approved, comment);
+    const completionContent = approved ? extractCompletionContent(result.completion) : "";
+    if (completionContent) {
+      state.lastApprovalCompletion = {
+        approvalId,
+        requestId: result.request_id,
+        deliveryMode: result.completion_delivery?.mode || "approval_resolve_response",
+        content: completionContent,
+      };
+    }
+    const successMessage = approved
+      ? completionContent
+        ? "승인 처리 및 모델 응답 수신 완료"
+        : "승인 처리 완료"
+      : "반려 처리 완료";
     setApprovalItemUiState(
       approvalId,
       APPROVAL_STATUS.SUCCESS,
@@ -577,9 +599,31 @@ function render() {
   renderEvents();
   renderPolicies();
   renderApprovals();
+  renderApprovalExecutionResult();
   renderRouting();
   renderSimulation();
   renderEvidencePackage();
+}
+
+function renderApprovalExecutionResult() {
+  const container = $("#approvalExecutionResult");
+  if (!container) return;
+  const result = state.lastApprovalCompletion;
+  container.replaceChildren();
+  if (!result) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+
+  const title = document.createElement("strong");
+  title.textContent = "최근 승인 실행 응답";
+  const meta = document.createElement("span");
+  meta.className = "muted";
+  meta.textContent = `요청 ${shortId(result.requestId)} / 승인 ${shortId(result.approvalId)} / ${result.deliveryMode}`;
+  const content = document.createElement("pre");
+  content.textContent = result.content;
+  container.append(title, meta, content);
 }
 
 function renderEvents() {
