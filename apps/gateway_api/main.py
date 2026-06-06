@@ -79,6 +79,17 @@ _MAX_STALE_EXECUTION_RECOVERIES = 100
 _STALE_EXECUTION_RECOVERY_REASONS = frozenset(
     {"execution_timeout", "process_restart", "operator_recovery"}
 )
+_STORED_CONTEXT_ERROR_KINDS = frozenset(
+    {
+        "missing_context",
+        "unsupported_context_type",
+        "invalid_route",
+        "invalid_messages",
+        "invalid_provider_options",
+        "invalid_gateway_metadata",
+        "invalid_prompt",
+    }
+)
 _APP_DIR = Path(__file__).resolve().parent
 _STATIC_DIR = _APP_DIR / "static"
 _PROVIDER_STATUS_RE = re.compile(r"provider request failed:\s+(?P<status>\d{3})")
@@ -461,12 +472,13 @@ def _execute_approved_context(
     return response
 
 
-def _stored_approval_context_error(kind: str = "invalid_context") -> ProviderError:
+def _stored_approval_context_error(kind: str = "missing_context") -> ProviderError:
+    normalized_kind = kind if kind in _STORED_CONTEXT_ERROR_KINDS else "unsupported_context_type"
     return ProviderError(
         error_type="stored_approval_context_error",
         retryable=False,
         safe_message="stored approval context is invalid",
-        metadata={"stored_context_error_kind": kind},
+        metadata={"stored_context_error_kind": normalized_kind},
     )
 
 
@@ -497,10 +509,21 @@ def _route_payload_from_approval_context(approval: ApprovalRequest) -> dict[str,
         return None
 
 
+def _failure_domain_for_error_type(error_type: str) -> str:
+    if error_type == "stored_approval_context_error":
+        return "gateway_state"
+    if error_type == "provider_invalid_response":
+        return "provider_response"
+    if error_type in {"provider_timeout", "provider_http_error", "provider_runtime_error"}:
+        return "provider_transport"
+    return "provider_transport"
+
+
 def _provider_error_summary(error: RuntimeError) -> dict[str, object]:
     if isinstance(error, ProviderError):
         payload: dict[str, object] = {
             "error_type": error.error_type,
+            "failure_domain": _failure_domain_for_error_type(error.error_type),
             "provider_status_code": error.status_code,
             "retryable": error.retryable,
             "provider_error_body_sha256": error.body_sha256,
@@ -525,6 +548,7 @@ def _provider_error_summary(error: RuntimeError) -> dict[str, object]:
     retryable = False if error_type == "provider_invalid_response" else retryable_for_status(status_code)
     payload: dict[str, object] = {
         "error_type": error_type,
+        "failure_domain": _failure_domain_for_error_type(error_type),
         "provider_status_code": status_code,
         "retryable": retryable,
         "provider_error_body_sha256": None,
@@ -575,6 +599,18 @@ def _approval_error_action_required(error_type: str | None, retryable: bool | No
     return None
 
 
+def _approval_resolution_mode(context_type: object, status: str) -> str:
+    if status == APPROVAL_STATUS_INVALID_CONTEXT:
+        return "invalid_context"
+    if context_type == "chat_completion":
+        return "provider_execution"
+    if context_type == "policy_evaluation":
+        return "policy_evaluation"
+    if context_type is None:
+        return "missing_context"
+    return "unsupported_context"
+
+
 def _stored_approval_context_http_detail(
     *,
     approval: ApprovalRequest,
@@ -587,6 +623,7 @@ def _stored_approval_context_http_detail(
         "current_status": approval.status,
         "retryable": False,
         "action_required": "operator_review",
+        "failure_domain": error_summary.get("failure_domain"),
         "stored_context_error_kind": error_summary.get("stored_context_error_kind"),
     }
 
@@ -663,6 +700,7 @@ def _append_approval_attempt_conflict_event(
                 if current_approval is not None
                 else approval.attempt_count,
                 "reason": "approval execution attempt changed",
+                "failure_domain": "approval_state_conflict",
                 "retryable": False,
             },
         )
@@ -907,7 +945,14 @@ def _require_approver(
 
 def _approval_payload(approval: ApprovalRequest) -> dict[str, object]:
     context_type = approval.context.get("type") if isinstance(approval.context, dict) else None
-    can_execute = approval.status == "pending" and approval.last_execution_retryable is not False
+    resolution_mode = _approval_resolution_mode(context_type, approval.status)
+    can_resolve = (
+        approval.status == "pending"
+        and approval.last_execution_retryable is not False
+        and resolution_mode in {"provider_execution", "policy_evaluation"}
+    )
+    can_execute_provider = can_resolve and resolution_mode == "provider_execution"
+    can_reject = approval.status in {"pending", APPROVAL_STATUS_INVALID_CONTEXT}
     recommended_action = _approval_error_action_required(
         approval.last_execution_error,
         approval.last_execution_retryable,
@@ -937,7 +982,11 @@ def _approval_payload(approval: ApprovalRequest) -> dict[str, object]:
         "last_execution_retryable": approval.last_execution_retryable,
         "retryable": approval.last_execution_retryable,
         "recommended_action": recommended_action,
-        "can_execute": can_execute,
+        "can_resolve": can_resolve,
+        "can_execute_provider": can_execute_provider,
+        "can_reject": can_reject,
+        "resolution_mode": resolution_mode,
+        "can_execute": can_resolve,
         "approval_context_type": context_type,
         "has_execution_context": context_type == "chat_completion",
     }
@@ -1128,7 +1177,7 @@ def _chain_verification_report(evidence_store: object) -> tuple[bool | None, dic
 
 
 if FastAPI is not None:
-    app = FastAPI(title="K-AI Security Gateway", version="0.1.8")
+    app = FastAPI(title="K-AI Security Gateway", version="0.1.9")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     @app.get("/")

@@ -28,6 +28,10 @@ Implemented:
   context before any provider call
 - Structured `409` stored context error responses with `invalid_context` approval
   state, `retryable=false`, and operator-review guidance in admin payloads
+- Approval capability hints split into `can_resolve`, `can_execute_provider`,
+  `can_reject`, and `resolution_mode`, with `can_execute` retained for compatibility
+- Failure-domain tagging for approval failure evidence: `gateway_state`,
+  `provider_transport`, `provider_response`, and `approval_state_conflict`
 - Explicit `policy_evaluation` context for non-provider approval resolutions so
   missing or unsupported approval context cannot silently succeed
 - Tamper-evident audit evidence store with in-memory and SQLite backends

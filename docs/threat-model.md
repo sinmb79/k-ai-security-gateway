@@ -38,6 +38,12 @@
   valid non-provider approvals must use an explicit `policy_evaluation` context.
 - Non-retryable stored context failures must remain visible for operator review
   while blocking repeated approved execution attempts.
+- Operator-facing approval payloads must distinguish resolution, provider
+  execution, and rejection capabilities so UI controls cannot infer the wrong
+  action from a single ambiguous flag.
+- Approval failure evidence must identify the failure domain so gateway state
+  errors, provider transport failures, provider response failures, and approval
+  state conflicts can be filtered separately.
 - Provider raw error bodies must not be copied into API responses, exception
   messages, or evidence package timelines.
 - Provider error body hashing must use a bounded read cap and record truncation

@@ -698,6 +698,9 @@ function renderApprovals() {
     if (approval.recommended_action) {
       executionParts.push(`action: ${approval.recommended_action}`);
     }
+    if (approval.resolution_mode) {
+      executionParts.push(`mode: ${approval.resolution_mode}`);
+    }
     executionNotice.textContent = executionParts.join(" / ");
 
     const status = document.createElement("span");
@@ -705,7 +708,7 @@ function renderApprovals() {
     status.className = `approval-item-status status-${statusState.status}`;
     status.textContent =
       statusState.message ||
-      (approval.can_execute === false ? "Operator review required" : "");
+      (approval.can_resolve === false ? "Operator review required" : "");
 
     const comment = document.createElement("textarea");
     comment.className = "approval-item-comment";
@@ -725,10 +728,14 @@ function renderApprovals() {
     rejectButton.dataset.action = "reject";
     const isBusy = statusState.status === APPROVAL_STATUS.PROCESSING;
     const baseDisabled = !adminToken || !approverToken || isBusy;
-    const executionDisabled = approval.can_execute === false || approval.retryable === false;
-    approveButton.disabled = baseDisabled || executionDisabled;
-    approveButton.title = executionDisabled ? "Operator review required" : "";
-    rejectButton.disabled = baseDisabled;
+    const resolveDisabled =
+      approval.can_resolve === false ||
+      approval.can_execute === false ||
+      approval.retryable === false;
+    const rejectDisabled = approval.can_reject === false;
+    approveButton.disabled = baseDisabled || resolveDisabled;
+    approveButton.title = resolveDisabled ? "Operator review required" : "";
+    rejectButton.disabled = baseDisabled || rejectDisabled;
 
     actions.append(approveButton, rejectButton);
     item.append(header, reason, metadata);

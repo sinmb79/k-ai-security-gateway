@@ -149,6 +149,7 @@ class ReportGeneratorTests(unittest.TestCase):
                     "status": "failed",
                     "approval_status": "invalid_context",
                     "provider_name": "external-openai-compatible",
+                    "failure_domain": "gateway_state",
                     "error_type": "stored_approval_context_error",
                     "stored_context_error_kind": "invalid_messages",
                     "provider_status_code": None,
@@ -191,6 +192,7 @@ class ReportGeneratorTests(unittest.TestCase):
 
         self.assertIn("abc123", rendered)
         self.assertIn("provider_error_body_truncated", rendered)
+        self.assertIn("gateway_state", rendered)
         self.assertIn("invalid_context", rendered)
         self.assertIn("invalid_messages", rendered)
         self.assertIn("approval_execution_stale_recovered", rendered)
