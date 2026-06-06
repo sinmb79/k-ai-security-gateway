@@ -15,7 +15,7 @@ kai-security = "kai_security.cli:main"
 
 [project.optional-dependencies]
 api = ["fastapi>=0.111,<1.0", "uvicorn>=0.30,<1.0"]
-dev = ["pytest>=8.0", "ruff>=0.5"]
+dev = ["httpx>=0.27,<1.0", "pytest>=8.0", "ruff>=0.5"]
 
 [build-system]
 requires = ["setuptools>=68"]
