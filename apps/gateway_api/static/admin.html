@@ -125,6 +125,8 @@
                   <option value="response_analyzed">response_analyzed</option>
                   <option value="approval_requested">approval_requested</option>
                   <option value="approval_resolved">approval_resolved</option>
+                  <option value="approval_executed">approval_executed</option>
+                  <option value="approval_execution_failed">approval_execution_failed</option>
                 </select>
               </label>
               <label>
@@ -261,6 +263,7 @@
               </label>
               <button type="button" id="clearApproverToken" class="muted-button">승인자 토큰 지우기</button>
               <span id="approvalActionStatus" class="approval-action-status muted">준비됨</span>
+              <div id="approvalExecutionResult" class="approval-execution-result" hidden></div>
             </div>
             <div id="approvalList" class="approval-list"></div>
           </article>

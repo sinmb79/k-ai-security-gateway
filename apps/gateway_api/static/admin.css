@@ -648,6 +648,29 @@ th {
   border-radius: 8px;
 }
 
+.approval-execution-result {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 10px;
+}
+
+.approval-execution-result[hidden] {
+  display: none;
+}
+
+.approval-execution-result pre {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  color: var(--text);
+}
+
 .link-button {
   border: 0;
   background: transparent;

@@ -71,6 +71,7 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     participant App as AI Application
+    participant Admin as Admin UI
     participant GW as K-AI Gateway
     participant D as Detectors
     participant P as Policy Engine
@@ -86,11 +87,19 @@ sequenceDiagram
         GW->>Q: Create approval item
         GW->>A: Append evidence event
         GW-->>App: Approval required response
-        Q-->>GW: Admin resolves approval
+        Admin->>GW: Resolve approval
         GW->>M: Execute stored safe request context
-        M-->>GW: Model response
-        GW->>GW: Guard response for PII and secrets
-        GW->>A: Append approval execution evidence
+        alt provider success
+            M-->>GW: Model response
+            GW->>GW: Guard response for PII and secrets
+            GW->>Q: Mark approval approved
+            GW->>A: Append approval execution evidence
+            GW-->>Admin: Completion in approval resolve response
+        else provider failure
+            M-->>GW: Temporary provider failure
+            GW->>A: Append approval_execution_failed
+            GW-->>Admin: 502, approval remains pending for retry
+        end
     else allowed path
         GW->>M: Forward masked or routed request
         M-->>GW: Model response
@@ -260,6 +269,9 @@ audit event search, and CSV/JSONL export behavior.
   proper identity, SSO/OIDC, network controls, TLS, key rotation, and retention policy.
 - The admin dashboard keeps admin and approver tokens in page memory only. Refreshing
   the page clears them.
+- Approved model responses are returned to the approval resolver and displayed in
+  the admin UI. Original client callback delivery is not implemented in the MVP.
+- If approved provider execution fails, the approval stays pending and can be retried.
 - Evidence reports are designed for review support. They are not legal advice or a
   substitute for a formal audit.
 
@@ -269,6 +281,8 @@ See [SECURITY.md](SECURITY.md) for reporting and handling guidance.
 
 - Streaming chat completion and tool-calling pass-through are not implemented yet.
 - Production SSO/RBAC integration is not implemented yet.
+- Original-client callback or polling delivery for approved completions is not
+  implemented yet.
 - Very large audit exports need cursor-based pagination.
 - Policy editing/version publishing in the dashboard is not complete.
 - Encrypted raw-prompt vault separation and retention enforcement are future hardening
