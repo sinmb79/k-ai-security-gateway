@@ -102,6 +102,10 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(payload["request_id"], "request-1")
         self.assertEqual(payload["status"], "pending")
         self.assertIsInstance(payload["created_at"], str)
+        self.assertTrue(payload["can_execute"])
+        self.assertIsNone(payload["retryable"])
+        self.assertIsNone(payload["recommended_action"])
+        self.assertFalse(payload["has_execution_context"])
 
     def test_coerce_bool_rejects_ambiguous_values(self) -> None:
         self.assertTrue(_coerce_bool("true"))
@@ -1297,7 +1301,9 @@ class GatewayApiContractTests(unittest.TestCase):
         client = TestClient(app)
         with patch("apps.gateway_api.main.gateway", service):
             service.evaluate(build_gateway_request({"prompt": "API key and secret exposed", "user_id": "alice"}))
-            approval_id = service.approval_queue.list_pending()[0].approval_id
+            pending_approval = service.approval_queue.list_pending()[0]
+            self.assertEqual(pending_approval.context, {"type": "policy_evaluation"})
+            approval_id = pending_approval.approval_id
             resolve_response = client.post(
                 f"/v1/approvals/{approval_id}/resolve",
                 headers={"Authorization": "Bearer admin-token"},
@@ -1524,13 +1530,45 @@ class GatewayApiContractTests(unittest.TestCase):
                 headers={"Authorization": "Bearer admin-token"},
                 json={"approval_token": "approver-token", "approved": True},
             )
+            pending_response = client.get(
+                "/v1/approvals/pending",
+                headers={"Authorization": "Bearer admin-token"},
+            )
+            stored_after_failure = service.approval_queue.get(approval_id)
+            retry_response = client.post(
+                f"/v1/approvals/{approval_id}/resolve",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"approval_token": "approver-token", "approved": True},
+            )
+            reject_response = client.post(
+                f"/v1/approvals/{approval_id}/resolve",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"approval_token": "approver-token", "approved": False},
+            )
 
-        self.assertEqual(resolve_response.status_code, 502)
+        self.assertEqual(resolve_response.status_code, 409)
+        detail = resolve_response.json()["detail"]
+        self.assertEqual(detail["error"], "stored_approval_context_error")
+        self.assertEqual(detail["approval_id"], approval_id)
+        self.assertEqual(detail["current_status"], "invalid_context")
+        self.assertEqual(detail["stored_context_error_kind"], "invalid_messages")
+        self.assertFalse(detail["retryable"])
+        self.assertEqual(detail["action_required"], "operator_review")
         adapter.complete.assert_not_called()
-        stored_after_failure = service.approval_queue.get(approval_id)
         self.assertIsNotNone(stored_after_failure)
-        self.assertEqual(stored_after_failure.status, "pending")
+        self.assertEqual(stored_after_failure.status, "invalid_context")
         self.assertEqual(stored_after_failure.last_execution_error, "stored_approval_context_error")
+        self.assertFalse(stored_after_failure.last_execution_retryable)
+        self.assertEqual(pending_response.status_code, 200)
+        pending_payload = pending_response.json()
+        self.assertEqual(len(pending_payload), 1)
+        self.assertEqual(pending_payload[0]["status"], "invalid_context")
+        self.assertFalse(pending_payload[0]["retryable"])
+        self.assertFalse(pending_payload[0]["can_execute"])
+        self.assertEqual(pending_payload[0]["recommended_action"], "operator_review")
+        self.assertEqual(retry_response.status_code, 409)
+        self.assertEqual(reject_response.status_code, 200)
+        self.assertEqual(reject_response.json()["status"], "rejected")
         failed_events = service.evidence_store.list_events(
             request_id=chat_response.json()["gateway_security"]["request_id"],
             event_type="approval_execution_failed",
@@ -1538,8 +1576,51 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(len(failed_events), 1)
         failed_payload = failed_events[0].payload
         self.assertEqual(failed_payload["error_type"], "stored_approval_context_error")
+        self.assertEqual(failed_payload["stored_context_error_kind"], "invalid_messages")
+        self.assertEqual(failed_payload["approval_status"], "invalid_context")
         self.assertFalse(failed_payload["retryable"])
         self.assertEqual(failed_payload["status"], "failed")
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_missing_or_unsupported_approval_context_is_invalid_context_error(self) -> None:
+        self._set_env("KAI_SECURITY_ADMIN_TOKENS", "admin-token=manager-1:admin")
+        self._set_env("KAI_SECURITY_APPROVER_TOKENS", "approver-token=approver-1:security_manager")
+        client = TestClient(app)
+
+        for context, expected_kind in (
+            (None, "missing_context"),
+            ({"type": "unknown_context"}, "unsupported_context_type"),
+        ):
+            service = GatewayService()
+            adapter = Mock()
+            approval = service.approval_queue.create(
+                request_id=f"req-{expected_kind}",
+                requested_by="alice",
+                reason="manual context test",
+                action="require_approval",
+                context=context,
+            )
+            with (
+                patch("apps.gateway_api.main.gateway", service),
+                patch("apps.gateway_api.main.resolve_provider_adapter", return_value=adapter),
+            ):
+                response = client.post(
+                    f"/v1/approvals/{approval.approval_id}/resolve",
+                    headers={"Authorization": "Bearer admin-token"},
+                    json={"approval_token": "approver-token", "approved": True},
+                )
+
+            self.assertEqual(response.status_code, 409)
+            detail = response.json()["detail"]
+            self.assertEqual(detail["error"], "stored_approval_context_error")
+            self.assertEqual(detail["stored_context_error_kind"], expected_kind)
+            self.assertEqual(detail["current_status"], "invalid_context")
+            self.assertFalse(detail["retryable"])
+            adapter.complete.assert_not_called()
+            stored = service.approval_queue.get(approval.approval_id)
+            self.assertIsNotNone(stored)
+            self.assertEqual(stored.status, "invalid_context")
+            self.assertFalse(stored.last_execution_retryable)
 
     @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
     def test_provider_error_records_retryability_without_raw_body(self) -> None:

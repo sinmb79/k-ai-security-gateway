@@ -285,6 +285,12 @@ audit event search, and CSV/JSONL export behavior.
   status-aware retryability metadata.
 - Stored approval context validation failures are recorded as non-retryable
   `stored_approval_context_error` gateway state errors and do not call the provider.
+  They return structured `409` details, move the approval to `invalid_context`,
+  expose `retryable=false` / `recommended_action=operator_review` in the admin
+  approval payload, and keep the item visible for rejection or manual review.
+- Policy-only approvals created by `/v1/security/evaluate` use an explicit
+  `policy_evaluation` context, so missing or unsupported approval context no
+  longer silently succeeds.
 - Provider raw error bodies are not placed in exception messages, API responses, or
   evidence package timelines. HTTP error bodies are reduced to SHA-256 hashes for
   correlation when available.

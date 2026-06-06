@@ -34,6 +34,10 @@
   a structured conflict response instead of silently consuming or changing approval state.
 - Stored approval context validation errors must be non-retryable gateway state
   errors and must not call an upstream provider.
+- Missing or unsupported approval context must not silently resolve as success;
+  valid non-provider approvals must use an explicit `policy_evaluation` context.
+- Non-retryable stored context failures must remain visible for operator review
+  while blocking repeated approved execution attempts.
 - Provider raw error bodies must not be copied into API responses, exception
   messages, or evidence package timelines.
 - Provider error body hashing must use a bounded read cap and record truncation

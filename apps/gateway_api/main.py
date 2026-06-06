@@ -20,6 +20,7 @@ from copy import deepcopy
 from kai_security.approval.queue import (
     APPROVAL_STATUS_APPROVED,
     APPROVAL_STATUS_EXECUTING,
+    APPROVAL_STATUS_INVALID_CONTEXT,
     ApprovalRequest,
 )
 from kai_security.detectors.pii import mask_token_for_label
@@ -401,30 +402,34 @@ def _execute_approved_context(
     allow_executing: bool = False,
 ) -> dict[str, object] | None:
     if approval.context is None:
-        return None
+        raise _stored_approval_context_error("missing_context")
     if approval.status != APPROVAL_STATUS_APPROVED:
         if not (allow_executing and approval.status == APPROVAL_STATUS_EXECUTING):
             return None
     context = approval.context
-    if context.get("type") != "chat_completion":
+    context_type = context.get("type")
+    if context_type == "policy_evaluation":
         return None
+    if context_type != "chat_completion":
+        raise _stored_approval_context_error("unsupported_context_type")
 
     try:
         route = _route_from_payload(context.get("route"))
     except RuntimeError as exc:
-        raise _stored_approval_context_error("stored approval route is invalid") from exc
+        raise _stored_approval_context_error("invalid_route") from exc
+
     messages = context.get("messages")
     provider_options = context.get("provider_options")
     gateway_security = context.get("gateway_security")
     effective_prompt = context.get("effective_prompt")
     if not isinstance(messages, list):
-        raise _stored_approval_context_error("stored approval messages are invalid")
+        raise _stored_approval_context_error("invalid_messages")
     if not isinstance(provider_options, dict):
-        raise _stored_approval_context_error("stored approval provider options are invalid")
+        raise _stored_approval_context_error("invalid_provider_options")
     if not isinstance(gateway_security, dict):
-        raise _stored_approval_context_error("stored approval gateway metadata is invalid")
+        raise _stored_approval_context_error("invalid_gateway_metadata")
     if not isinstance(effective_prompt, str):
-        raise _stored_approval_context_error("stored approval prompt is invalid")
+        raise _stored_approval_context_error("invalid_prompt")
 
     execution_security = deepcopy(gateway_security)
     if approval.execution_attempt_id:
@@ -456,12 +461,12 @@ def _execute_approved_context(
     return response
 
 
-def _stored_approval_context_error(message: str = "stored approval context is invalid") -> ProviderError:
-    _ = message
+def _stored_approval_context_error(kind: str = "invalid_context") -> ProviderError:
     return ProviderError(
         error_type="stored_approval_context_error",
         retryable=False,
         safe_message="stored approval context is invalid",
+        metadata={"stored_context_error_kind": kind},
     )
 
 
@@ -494,13 +499,18 @@ def _route_payload_from_approval_context(approval: ApprovalRequest) -> dict[str,
 
 def _provider_error_summary(error: RuntimeError) -> dict[str, object]:
     if isinstance(error, ProviderError):
-        return {
+        payload: dict[str, object] = {
             "error_type": error.error_type,
             "provider_status_code": error.status_code,
             "retryable": error.retryable,
             "provider_error_body_sha256": error.body_sha256,
             "provider_error_body_truncated": error.body_truncated,
         }
+        if error.metadata:
+            for key in ("stored_context_error_kind",):
+                if key in error.metadata:
+                    payload[key] = error.metadata[key]
+        return payload
     message = str(error).lower()
     match = _PROVIDER_STATUS_RE.search(str(error))
     status_code = int(match.group("status")) if match else None
@@ -535,6 +545,7 @@ def _append_approval_execution_failed_event(
         "approval_id": approval.approval_id,
         "route": route,
         "status": "failed",
+        "approval_status": approval.status,
         "provider_name": route.get("provider") if isinstance(route, dict) else None,
         "attempt_count": approval.attempt_count,
         "execution_attempt_id": approval.execution_attempt_id,
@@ -552,6 +563,32 @@ def _append_approval_execution_failed_event(
             payload=payload,
         )
     )
+
+
+def _approval_error_action_required(error_type: str | None, retryable: bool | None) -> str | None:
+    if error_type == "stored_approval_context_error":
+        return "operator_review"
+    if retryable is False:
+        return "operator_review"
+    if retryable is True:
+        return "retry"
+    return None
+
+
+def _stored_approval_context_http_detail(
+    *,
+    approval: ApprovalRequest,
+    error: RuntimeError,
+) -> dict[str, object]:
+    error_summary = _provider_error_summary(error)
+    return {
+        "error": "stored_approval_context_error",
+        "approval_id": approval.approval_id,
+        "current_status": approval.status,
+        "retryable": False,
+        "action_required": "operator_review",
+        "stored_context_error_kind": error_summary.get("stored_context_error_kind"),
+    }
 
 
 def _append_approval_stale_recovered_event(
@@ -869,6 +906,12 @@ def _require_approver(
 
 
 def _approval_payload(approval: ApprovalRequest) -> dict[str, object]:
+    context_type = approval.context.get("type") if isinstance(approval.context, dict) else None
+    can_execute = approval.status == "pending" and approval.last_execution_retryable is not False
+    recommended_action = _approval_error_action_required(
+        approval.last_execution_error,
+        approval.last_execution_retryable,
+    )
     return {
         "approval_id": approval.approval_id,
         "request_id": approval.request_id,
@@ -891,7 +934,12 @@ def _approval_payload(approval: ApprovalRequest) -> dict[str, object]:
         "first_failed_at": approval.first_failed_at.isoformat() if approval.first_failed_at else None,
         "last_failed_at": approval.last_failed_at.isoformat() if approval.last_failed_at else None,
         "last_execution_error": approval.last_execution_error,
-        "has_execution_context": approval.context is not None,
+        "last_execution_retryable": approval.last_execution_retryable,
+        "retryable": approval.last_execution_retryable,
+        "recommended_action": recommended_action,
+        "can_execute": can_execute,
+        "approval_context_type": context_type,
+        "has_execution_context": context_type == "chat_completion",
     }
 
 
@@ -1080,7 +1128,7 @@ def _chain_verification_report(evidence_store: object) -> tuple[bool | None, dic
 
 
 if FastAPI is not None:
-    app = FastAPI(title="K-AI Security Gateway", version="0.1.7")
+    app = FastAPI(title="K-AI Security Gateway", version="0.1.8")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     @app.get("/")
@@ -1282,12 +1330,17 @@ if FastAPI is not None:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except RuntimeError as exc:
             if executing_approval is not None:
-                error_type = str(_provider_error_summary(exc)["error_type"])
+                error_summary = _provider_error_summary(exc)
+                error_type = str(error_summary["error_type"])
                 try:
                     failed_approval = gateway.approval_queue.fail_execution(
                         approval_id,
                         expected_execution_attempt_id=executing_approval.execution_attempt_id or "",
                         error_type=error_type,
+                        retryable=bool(error_summary["retryable"]),
+                        final_status=APPROVAL_STATUS_INVALID_CONTEXT
+                        if error_type == "stored_approval_context_error"
+                        else None,
                     )
                 except ValueError as state_exc:
                     raise _approval_attempt_conflict_exception(
@@ -1300,6 +1353,14 @@ if FastAPI is not None:
                     error=exc,
                     service=gateway,
                 )
+                if error_type == "stored_approval_context_error":
+                    raise HTTPException(
+                        status_code=409,
+                        detail=_stored_approval_context_http_detail(
+                            approval=failed_approval,
+                            error=exc,
+                        ),
+                    ) from exc
             raise HTTPException(status_code=502, detail="approved provider request failed") from exc
         gateway.evidence_store.append(
             AuditEvent(

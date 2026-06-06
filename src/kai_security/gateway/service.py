@@ -73,6 +73,7 @@ class GatewayService:
                 requested_by=request.user_id,
                 reason=decision.reason,
                 action=decision.action.value,
+                context={"type": "policy_evaluation"},
             )
             approval_id = approval.approval_id
             self._record(

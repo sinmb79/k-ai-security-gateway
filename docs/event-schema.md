@@ -85,7 +85,8 @@ must describe the decision reason in human-readable text.
 - `approval_id`, `request_id`, `requested_by`, `reason`, `action`, `status`,
   `created_at`, `resolved_by`, `resolved_at`, `resolution_comment`
 
-Approval status values are `pending`, `executing`, `approved`, or `rejected`.
+Approval status values are `pending`, `executing`, `approved`, `rejected`, or
+`invalid_context`.
 The transient `executing` status is used to prevent duplicate provider calls while
 an approved request is being forwarded.
 
@@ -105,9 +106,11 @@ an approved request is being forwarded.
 - `approval_id` (string)
 - `route` (object)
 - `status` (`failed`)
+- `approval_status` (`pending` or `invalid_context`)
 - `provider_name` (string, optional)
 - `error_type` (`provider_timeout`, `provider_invalid_response`, `provider_http_error`,
   `provider_runtime_error`, or `stored_approval_context_error`)
+- `stored_context_error_kind` (string, optional for `stored_approval_context_error`)
 - `provider_status_code` (number or null)
 - `provider_error_body_sha256` (string or null)
 - `provider_error_body_truncated` (boolean)
@@ -117,9 +120,9 @@ an approved request is being forwarded.
 - `last_failed_at` (string)
 - `retryable` (boolean)
 
-Provider execution failures do not resolve or consume the approval request. The
-approval remains `pending` so an authorized approver can retry after the provider
-or network issue is fixed.
+Retryable provider execution failures do not resolve or consume the approval
+request. The approval remains `pending` so an authorized approver can retry after
+the provider or network issue is fixed.
 
 Provider raw error bodies are not copied into exception messages, API responses, or
 evidence package timelines. When a provider returns an HTTP error body, the event may
@@ -129,7 +132,9 @@ for correlation. Retryability is status-aware: network timeouts, `408`, `409`, `
 `403`, `404`, and `422` are not. Invalid provider response shape is non-retryable.
 Stored approval context validation failures are recorded as
 `stored_approval_context_error`, are non-retryable, and are treated as gateway
-state/data errors rather than provider transport failures.
+state/data errors rather than provider transport failures. They move the approval
+to `invalid_context`, return structured HTTP `409` detail with
+`action_required=operator_review`, and do not call the upstream provider.
 
 ### `approval_execution_stale_recovered`
 

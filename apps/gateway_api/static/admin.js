@@ -689,10 +689,23 @@ function renderApprovals() {
     metadata.className = "muted";
     metadata.textContent = `요청 ${shortId(approval.request_id)} / ${approval.requested_by || ""}`;
 
+    const executionNotice = document.createElement("span");
+    executionNotice.className = "muted";
+    const executionParts = [];
+    if (approval.last_execution_error) {
+      executionParts.push(`last error: ${approval.last_execution_error}`);
+    }
+    if (approval.recommended_action) {
+      executionParts.push(`action: ${approval.recommended_action}`);
+    }
+    executionNotice.textContent = executionParts.join(" / ");
+
     const status = document.createElement("span");
     const statusState = getApprovalItemUiState(approval.approval_id);
     status.className = `approval-item-status status-${statusState.status}`;
-    status.textContent = statusState.message;
+    status.textContent =
+      statusState.message ||
+      (approval.can_execute === false ? "Operator review required" : "");
 
     const comment = document.createElement("textarea");
     comment.className = "approval-item-comment";
@@ -711,12 +724,18 @@ function renderApprovals() {
     approveButton.dataset.action = "approve";
     rejectButton.dataset.action = "reject";
     const isBusy = statusState.status === APPROVAL_STATUS.PROCESSING;
-    const disabled = !adminToken || !approverToken || isBusy;
-    approveButton.disabled = disabled;
-    rejectButton.disabled = disabled;
+    const baseDisabled = !adminToken || !approverToken || isBusy;
+    const executionDisabled = approval.can_execute === false || approval.retryable === false;
+    approveButton.disabled = baseDisabled || executionDisabled;
+    approveButton.title = executionDisabled ? "Operator review required" : "";
+    rejectButton.disabled = baseDisabled;
 
     actions.append(approveButton, rejectButton);
-    item.append(header, reason, metadata, status, comment, actions);
+    item.append(header, reason, metadata);
+    if (executionNotice.textContent) {
+      item.append(executionNotice);
+    }
+    item.append(status, comment, actions);
     fragment.appendChild(item);
   });
   list.appendChild(fragment);
