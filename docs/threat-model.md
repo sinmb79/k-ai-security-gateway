@@ -28,8 +28,12 @@
 - Restricted data must not be sent to external model zones without approval.
 - Approved restricted requests must only be marked `approved` after the stored
   safe request context has executed successfully.
+- Approval success/failure transitions must match the current
+  `execution_attempt_id`; stale callbacks must not mutate newer attempts.
 - Provider raw error bodies must not be copied into API responses, exception
   messages, or evidence package timelines.
+- Provider error body hashing must use a bounded read cap and record truncation
+  status instead of loading unbounded upstream error bodies.
 - High-risk document/RAG hidden instructions must require approval before
   external model routing.
 - Raw prompt retention must be configurable and minimized.
@@ -39,7 +43,7 @@
 
 - Approval execution locking is in-memory and process-local. Multi-worker or
   multi-replica deployments require a persistent transactional approval backend.
-- Provider idempotency keys are attempt-scoped in the MVP. Production hardening
+- Provider idempotency keys remain attempt-scoped in the MVP. Production hardening
   should add a logical approval-level execution ledger and unknown-outcome
   handling.
 

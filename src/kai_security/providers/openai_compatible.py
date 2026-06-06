@@ -10,6 +10,8 @@ from urllib.request import Request, urlopen
 
 from kai_security.providers.errors import ProviderError, retryable_for_status
 
+_MAX_ERROR_BODY_BYTES = 64 * 1024
+
 
 class OpenAICompatibleHTTPAdapter:
     """Adapter that sends chat/completion payloads to OpenAI-compatible endpoints."""
@@ -92,13 +94,14 @@ def _post_chat_completion(
         with urlopen(request, timeout=timeout_seconds) as response:
             raw = response.read().decode("utf-8")
     except HTTPError as exc:
-        error_body = exc.read() if getattr(exc, "read", None) else b""
+        error_body, error_body_truncated = _read_capped_error_body(exc)
         raise ProviderError(
             error_type="provider_http_error",
             status_code=exc.code,
             retryable=retryable_for_status(exc.code),
             safe_message=f"provider request failed with HTTP {exc.code}",
             body_sha256=sha256(error_body).hexdigest() if error_body else None,
+            body_truncated=error_body_truncated,
         ) from exc
     except (URLError, TimeoutError) as exc:
         message = str(exc).lower()
@@ -129,6 +132,15 @@ def _post_chat_completion(
 def _send_upstream_metadata_enabled() -> bool:
     raw = os.environ.get("KAI_SECURITY_SEND_UPSTREAM_METADATA", "")
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _read_capped_error_body(error: HTTPError) -> tuple[bytes, bool]:
+    if not getattr(error, "read", None):
+        return b"", False
+    raw = error.read(_MAX_ERROR_BODY_BYTES + 1)
+    if len(raw) <= _MAX_ERROR_BODY_BYTES:
+        return raw, False
+    return raw[:_MAX_ERROR_BODY_BYTES], True
 
 
 def _header_safe_value(value: object) -> str:

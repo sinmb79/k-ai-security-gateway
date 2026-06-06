@@ -19,9 +19,9 @@ Implemented:
 - Policy DSL loading from JSON-compatible YAML/JSON
 - Policy decisions: `allow`, `mask`, `route_private`, `require_approval`, `block`
 - Approval queue and admin/approver Bearer-token resolution flow with explicit
-  `pending -> executing -> approved` execution state transitions
+  attempt-aware `pending -> executing -> approved` execution state transitions
 - Approval execution failure rollback, stale `executing` recovery, sanitized
-  provider error evidence, and status-aware retryability metadata
+  provider error evidence with capped body hashes, and status-aware retryability metadata
 - Tamper-evident audit evidence store with in-memory and SQLite backends
 - Request-level evidence package reports with hash-chain verification metadata
 - Response guard for model outputs, including PII masking and secret blocking
@@ -76,7 +76,8 @@ These are intentionally outside this MVP release candidate or deferred hardening
 - OIDC/SAML SSO and production RBAC integration
 - Persistent transactional approval backend for multi-worker or multi-replica
   deployments
-- Logical approval-level idempotency ledger separate from per-attempt audit IDs
+- Logical approval-level idempotency ledger and unknown-outcome handling separate
+  from per-attempt audit IDs
 - Retention policy enforcement and encrypted raw-prompt vault separation
 - Broader Korean PII categories such as passport, driver license, vehicle number,
   and customer-specific allowlists

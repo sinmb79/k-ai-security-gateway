@@ -12,6 +12,7 @@ class ProviderError(RuntimeError):
     status_code: int | None = None
     retryable: bool = True
     body_sha256: str | None = None
+    body_truncated: bool = False
 
     def __str__(self) -> str:
         return self.safe_message

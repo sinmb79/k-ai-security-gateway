@@ -106,13 +106,21 @@ class InMemoryApprovalQueue:
             self._requests[approval_id] = executing
             return self._copy(executing)
 
-    def fail_execution(self, approval_id: str, *, error_type: str) -> ApprovalRequest:
+    def fail_execution(
+        self,
+        approval_id: str,
+        *,
+        expected_execution_attempt_id: str,
+        error_type: str,
+    ) -> ApprovalRequest:
         with self._lock:
             request = self._requests.get(approval_id)
             if request is None:
                 raise KeyError(f"Approval request not found: {approval_id}")
-            if request.status != self._status_executing:
-                raise ValueError(f"Approval request is not executing: {approval_id}")
+            self._require_current_execution_attempt(
+                request,
+                expected_execution_attempt_id=expected_execution_attempt_id,
+            )
             failed_at = datetime.now(UTC)
             pending = replace(
                 request,
@@ -131,6 +139,7 @@ class InMemoryApprovalQueue:
         self,
         approval_id: str,
         *,
+        expected_execution_attempt_id: str,
         resolved_by: str,
         comment: str = "",
     ) -> ApprovalRequest:
@@ -138,8 +147,10 @@ class InMemoryApprovalQueue:
             request = self._requests.get(approval_id)
             if request is None:
                 raise KeyError(f"Approval request not found: {approval_id}")
-            if request.status != self._status_executing:
-                raise ValueError(f"Approval request must be executing before approval: {approval_id}")
+            self._require_current_execution_attempt(
+                request,
+                expected_execution_attempt_id=expected_execution_attempt_id,
+            )
             resolved_request = replace(
                 request,
                 status=self._status_approved,
@@ -186,12 +197,24 @@ class InMemoryApprovalQueue:
         comment: str = "",
     ) -> ApprovalRequest:
         if approved:
-            return self.finish_execution_success(
-                approval_id,
-                resolved_by=resolved_by,
-                comment=comment,
-            )
+            raise ValueError("Approved resolution requires an explicit execution attempt.")
         return self.reject_pending(approval_id, resolved_by=resolved_by, comment=comment)
+
+    def assert_execution_attempt(
+        self,
+        approval_id: str,
+        *,
+        expected_execution_attempt_id: str,
+    ) -> ApprovalRequest:
+        with self._lock:
+            request = self._requests.get(approval_id)
+            if request is None:
+                raise KeyError(f"Approval request not found: {approval_id}")
+            self._require_current_execution_attempt(
+                request,
+                expected_execution_attempt_id=expected_execution_attempt_id,
+            )
+            return self._copy(request)
 
     def recover_stale_executions(
         self,
@@ -199,21 +222,25 @@ class InMemoryApprovalQueue:
         timeout_seconds: float,
         reason: str = "execution_timeout",
         now: datetime | None = None,
+        limit: int | None = None,
     ) -> list[ApprovalRequest]:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if limit is not None and limit <= 0:
+            raise ValueError("limit must be positive")
         current_time = (now or datetime.now(UTC)).astimezone(UTC)
         recovered: list[ApprovalRequest] = []
         with self._lock:
             for approval_id, request in list(self._requests.items()):
-                if request.status != self._status_executing or request.execution_started_at is None:
+                if not self._is_stale_execution(
+                    request,
+                    timeout_seconds=timeout_seconds,
+                    current_time=current_time,
+                ):
                     continue
                 started_at = request.execution_started_at
-                if started_at.tzinfo is None:
+                if started_at is not None and started_at.tzinfo is None:
                     started_at = started_at.replace(tzinfo=UTC)
-                elapsed = (current_time - started_at.astimezone(UTC)).total_seconds()
-                if elapsed < timeout_seconds:
-                    continue
                 recovered_request = replace(
                     request,
                     status=self._status_pending,
@@ -225,7 +252,35 @@ class InMemoryApprovalQueue:
                 )
                 self._requests[approval_id] = recovered_request
                 recovered.append(self._copy(recovered_request))
+                if limit is not None and len(recovered) >= limit:
+                    break
         return recovered
+
+    def list_stale_executions(
+        self,
+        *,
+        timeout_seconds: float,
+        now: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[ApprovalRequest]:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        if limit is not None and limit <= 0:
+            raise ValueError("limit must be positive")
+        current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        stale: list[ApprovalRequest] = []
+        with self._lock:
+            for request in self._requests.values():
+                if not self._is_stale_execution(
+                    request,
+                    timeout_seconds=timeout_seconds,
+                    current_time=current_time,
+                ):
+                    continue
+                stale.append(self._copy(request))
+                if limit is not None and len(stale) >= limit:
+                    break
+        return stale
 
     def get(self, approval_id: str) -> ApprovalRequest | None:
         with self._lock:
@@ -248,4 +303,33 @@ class InMemoryApprovalQueue:
 
     def _generate_id(self) -> str:
         return uuid4().hex
+
+    def _require_current_execution_attempt(
+        self,
+        request: ApprovalRequest,
+        *,
+        expected_execution_attempt_id: str,
+    ) -> None:
+        expected_attempt = str(expected_execution_attempt_id or "").strip()
+        if not expected_attempt:
+            raise ValueError("expected_execution_attempt_id is required")
+        if request.status != self._status_executing:
+            raise ValueError(f"Approval request is not executing: {request.approval_id}")
+        if request.execution_attempt_id != expected_attempt:
+            raise ValueError(f"Approval execution attempt changed: {request.approval_id}")
+
+    def _is_stale_execution(
+        self,
+        request: ApprovalRequest,
+        *,
+        timeout_seconds: float,
+        current_time: datetime,
+    ) -> bool:
+        if request.status != self._status_executing or request.execution_started_at is None:
+            return False
+        started_at = request.execution_started_at
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
+        elapsed = (current_time - started_at.astimezone(UTC)).total_seconds()
+        return elapsed >= timeout_seconds
 
