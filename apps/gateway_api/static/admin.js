@@ -19,7 +19,6 @@ const state = {
 };
 
 const $ = (selector) => document.querySelector(selector);
-const APPROVAL_TOKEN_KEY = "kaiApproverToken";
 const APPROVAL_STATUS = {
   IDLE: "idle",
   PROCESSING: "processing",
@@ -27,8 +26,8 @@ const APPROVAL_STATUS = {
   ERROR: "error",
 };
 
-let adminToken = sessionStorage.getItem("kaiAdminToken") || "";
-let approverToken = sessionStorage.getItem(APPROVAL_TOKEN_KEY) || "";
+let adminToken = "";
+let approverToken = "";
 
 function syncAuthInput() {
   const input = $("#adminToken");
@@ -274,11 +273,6 @@ function getDefaultApprovalComment() {
 function handleApproverTokenInput() {
   approverToken = $("#approverToken").value.trim();
   if (approverToken) {
-    sessionStorage.setItem(APPROVAL_TOKEN_KEY, approverToken);
-  } else {
-    sessionStorage.removeItem(APPROVAL_TOKEN_KEY);
-  }
-  if (approverToken) {
     setApprovalActionStatus("Approver token set", APPROVAL_STATUS.SUCCESS);
   } else {
     setApprovalActionStatus("Approver token removed", APPROVAL_STATUS.IDLE);
@@ -288,7 +282,6 @@ function handleApproverTokenInput() {
 
 function clearApproverToken() {
   approverToken = "";
-  sessionStorage.removeItem(APPROVAL_TOKEN_KEY);
   syncApproverInput();
   setApprovalActionStatus("Approver token cleared", APPROVAL_STATUS.IDLE);
   renderApprovals();
@@ -789,7 +782,6 @@ function renderEvidencePackage() {
 
 function clearAdminToken() {
   adminToken = "";
-  sessionStorage.removeItem("kaiAdminToken");
   syncAuthInput();
   state.events = [];
   state.policy = null;
@@ -805,11 +797,6 @@ function clearAdminToken() {
 function handleAuthSubmit(event) {
   event.preventDefault();
   adminToken = $("#adminToken").value.trim();
-  if (adminToken) {
-    sessionStorage.setItem("kaiAdminToken", adminToken);
-  } else {
-    sessionStorage.removeItem("kaiAdminToken");
-  }
   refresh();
 }
 

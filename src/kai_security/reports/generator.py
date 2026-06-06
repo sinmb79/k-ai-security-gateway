@@ -16,7 +16,7 @@ _REQUIRED_REQUEST_EVENT_TYPES = (
     "request_finalized",
 )
 _SAFE_TIMELINE_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
-    "request_received": ("user_id",),
+    "request_received": ("user_id", "department", "metadata"),
     "request_analyzed": ("risk_score", "finding_count", "findings"),
     "policy_decided": (
         "action",
@@ -57,6 +57,8 @@ _SAFE_TIMELINE_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
         "resolved_at",
         "approver_role",
     ),
+    "approval_executed": ("approval_id", "route", "status", "response_guard"),
+    "approval_execution_failed": ("approval_id", "route", "status"),
     "request_finalized": ("action", "effective_prompt_changed"),
 }
 

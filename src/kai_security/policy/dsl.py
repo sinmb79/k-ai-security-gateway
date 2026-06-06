@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Iterable
+from typing import Final, Iterable
 
 from kai_security.models import DataGrade, ModelZone, PolicyAction, RiskKind
 

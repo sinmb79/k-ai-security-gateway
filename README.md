@@ -86,6 +86,11 @@ sequenceDiagram
         GW->>Q: Create approval item
         GW->>A: Append evidence event
         GW-->>App: Approval required response
+        Q-->>GW: Admin resolves approval
+        GW->>M: Execute stored safe request context
+        M-->>GW: Model response
+        GW->>GW: Guard response for PII and secrets
+        GW->>A: Append approval execution evidence
     else allowed path
         GW->>M: Forward masked or routed request
         M-->>GW: Model response
@@ -253,6 +258,8 @@ audit event search, and CSV/JSONL export behavior.
 - `.env.example` contains placeholders only.
 - Admin and approver APIs are token-gated, but production deployments should add
   proper identity, SSO/OIDC, network controls, TLS, key rotation, and retention policy.
+- The admin dashboard keeps admin and approver tokens in page memory only. Refreshing
+  the page clears them.
 - Evidence reports are designed for review support. They are not legal advice or a
   substitute for a formal audit.
 

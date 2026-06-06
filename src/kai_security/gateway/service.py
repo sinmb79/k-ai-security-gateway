@@ -34,7 +34,7 @@ class GatewayService:
         approval_id = None
         route = choose_route(decision, request.requested_model)
 
-        self._record("request_received", request.request_id, {"user_id": request.user_id})
+        self._record("request_received", request.request_id, _request_received_payload(request))
         self._record(
             "request_analyzed",
             request.request_id,
@@ -141,6 +141,21 @@ def _effective_prompt(prompt: str, detection: DetectionResult, action: object) -
     if action_value == "mask" and detection.masked_text:
         return detection.masked_text
     return prompt
+
+
+def _request_received_payload(request: GatewayRequest) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "user_id": request.user_id,
+        "department": request.department,
+    }
+    safe_metadata = {
+        key: value
+        for key, value in request.metadata.items()
+        if key.startswith("authenticated_") or key.startswith("client_supplied_")
+    }
+    if safe_metadata:
+        payload["metadata"] = safe_metadata
+    return payload
 
 
 def _model_route_payload(

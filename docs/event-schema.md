@@ -8,6 +8,8 @@
 - `model_routed`
 - `approval_requested` (optional when decision is `require_approval`)
 - `approval_resolved`
+- `approval_executed` (optional when an approved chat completion is forwarded)
+- `approval_execution_failed` (optional when approved forwarding fails)
 - `response_analyzed` (optional when a provider response is returned)
 - `request_finalized`
 
@@ -26,6 +28,11 @@
 ### `request_received`
 
 - `user_id` (string)
+- `department` (string)
+- `metadata.authenticated_client_id` (string, optional)
+- `metadata.authenticated_client_department` (string, optional)
+- `metadata.client_supplied_user_id` (string, optional)
+- `metadata.client_supplied_department` (string, optional)
 
 ### `request_analyzed`
 
@@ -75,6 +82,19 @@ must describe the decision reason in human-readable text.
 
 - `approval_id`, `request_id`, `requested_by`, `reason`, `action`, `status`,
   `created_at`, `resolved_by`, `resolved_at`, `resolution_comment`
+
+### `approval_executed`
+
+- `approval_id` (string)
+- `route` (object)
+- `status` (`executed`)
+- `response_guard` (object, optional)
+
+### `approval_execution_failed`
+
+- `approval_id` (string)
+- `route` (object)
+- `status` (`failed`)
 
 ### `response_analyzed`
 
