@@ -20,7 +20,9 @@ $env:KAI_SECURITY_DB_PATH = ".\data\evidence.sqlite3"
 
 ## Docker Compose 실행
 
-Docker 환경에서는 8765 포트로 공개됩니다.
+Docker Compose 기본값은 호스트의 `127.0.0.1:8765`에만 API를 바인딩합니다.
+사내망이나 공개망에 노출하려면 reverse proxy, TLS, IP allowlist, 운영형 인증을 먼저 구성한 뒤
+`docker-compose.yml`의 `ports` 값을 의도적으로 바꾸세요.
 
 먼저 `.env.example`을 참고해 `.env`를 만들거나, 현재 PowerShell 세션에 필수 토큰을 주입하세요.
 

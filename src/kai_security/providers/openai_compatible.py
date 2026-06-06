@@ -68,6 +68,10 @@ def _post_chat_completion(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
+    idempotency_key = _header_safe_value(gateway_security.get("idempotency_key"))
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+
     if _send_upstream_metadata_enabled():
         headers["X-KAI-Security"] = json.dumps(
             _upstream_gateway_security(gateway_security),
@@ -102,6 +106,13 @@ def _post_chat_completion(
 def _send_upstream_metadata_enabled() -> bool:
     raw = os.environ.get("KAI_SECURITY_SEND_UPSTREAM_METADATA", "")
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _header_safe_value(value: object) -> str:
+    text = str(value or "").strip()
+    if "\r" in text or "\n" in text:
+        return ""
+    return text[:200]
 
 
 def _upstream_gateway_security(gateway_security: dict[str, object]) -> dict[str, object]:

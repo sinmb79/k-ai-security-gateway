@@ -83,11 +83,17 @@ must describe the decision reason in human-readable text.
 - `approval_id`, `request_id`, `requested_by`, `reason`, `action`, `status`,
   `created_at`, `resolved_by`, `resolved_at`, `resolution_comment`
 
+Approval status values are `pending`, `executing`, `approved`, or `rejected`.
+The transient `executing` status is used to prevent duplicate provider calls while
+an approved request is being forwarded.
+
 ### `approval_executed`
 
 - `approval_id` (string)
 - `route` (object)
 - `status` (`executed`)
+- `attempt_count` (number)
+- `execution_attempt_id` (string)
 - `response_guard` (object, optional)
 - `delivery.mode` (`approval_resolve_response`)
 - `delivery.original_client_callback` (boolean, currently `false`)
@@ -97,6 +103,15 @@ must describe the decision reason in human-readable text.
 - `approval_id` (string)
 - `route` (object)
 - `status` (`failed`)
+- `provider_name` (string, optional)
+- `error_type` (`provider_timeout`, `provider_invalid_response`, `provider_http_error`,
+  or `provider_runtime_error`)
+- `provider_status_code` (number or null)
+- `attempt_count` (number)
+- `execution_attempt_id` (string)
+- `first_failed_at` (string)
+- `last_failed_at` (string)
+- `retryable` (boolean)
 
 Provider execution failures do not resolve or consume the approval request. The
 approval remains `pending` so an authorized approver can retry after the provider

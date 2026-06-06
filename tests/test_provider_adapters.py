@@ -182,6 +182,62 @@ class ProviderAdapterTests(unittest.TestCase):
         )
 
     @patch("kai_security.providers.openai_compatible.urlopen")
+    def test_openai_adapter_sends_safe_idempotency_key_header(self, mock_urlopen) -> None:
+        class _FakeHTTPResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return (
+                    b"{"
+                    b'"id":"mock-id","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"provider response"}}]}'
+                )
+
+        mock_urlopen.return_value = _FakeHTTPResponse()
+        adapter = OpenAICompatibleHTTPAdapter(endpoint="https://provider.local", api_key="secret")
+        adapter.complete(
+            request_id="req-1",
+            model="mock-model",
+            messages=[{"role": "user", "content": "hello"}],
+            effective_prompt="hello",
+            gateway_security={"action": "allow", "idempotency_key": "kai-approval-1-attempt-1"},
+        )
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertEqual(request.headers["Idempotency-key"], "kai-approval-1-attempt-1")
+
+    @patch("kai_security.providers.openai_compatible.urlopen")
+    def test_openai_adapter_drops_unsafe_idempotency_key_header(self, mock_urlopen) -> None:
+        class _FakeHTTPResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return (
+                    b"{"
+                    b'"id":"mock-id","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"provider response"}}]}'
+                )
+
+        mock_urlopen.return_value = _FakeHTTPResponse()
+        adapter = OpenAICompatibleHTTPAdapter(endpoint="https://provider.local", api_key="secret")
+        adapter.complete(
+            request_id="req-1",
+            model="mock-model",
+            messages=[{"role": "user", "content": "hello"}],
+            effective_prompt="hello",
+            gateway_security={"action": "allow", "idempotency_key": "bad\r\nInjected: yes"},
+        )
+
+        request = mock_urlopen.call_args.args[0]
+        self.assertNotIn("Idempotency-key", request.headers)
+
+    @patch("kai_security.providers.openai_compatible.urlopen")
     def test_openai_adapter_converts_malformed_json_to_runtime_error(self, mock_urlopen) -> None:
         class _BrokenHTTPResponse:
             def __enter__(self):

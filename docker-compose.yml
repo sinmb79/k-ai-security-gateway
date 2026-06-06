@@ -5,7 +5,7 @@ services:
     build: .
     container_name: kai-security-gateway
     ports:
-      - "8765:8765"
+      - "127.0.0.1:8765:8765"
     environment:
       - PYTHONPATH=/app/src
       - KAI_SECURITY_DB_PATH=/app/data/evidence.sqlite3

@@ -4,6 +4,7 @@ from dataclasses import FrozenInstanceError
 
 from kai_security.approval.queue import (
     APPROVAL_STATUS_APPROVED,
+    APPROVAL_STATUS_EXECUTING,
     APPROVAL_STATUS_PENDING,
     APPROVAL_STATUS_REJECTED,
     InMemoryApprovalQueue,
@@ -96,6 +97,44 @@ class ApprovalQueueTests(unittest.TestCase):
         current = self.queue.get(request.approval_id)
         self.assertIsNotNone(current)
         self.assertEqual(current.status, APPROVAL_STATUS_APPROVED)
+
+    def test_execution_state_blocks_duplicate_execution_and_can_retry_after_failure(self) -> None:
+        request = self.queue.create(
+            request_id="req-exec",
+            requested_by="alice",
+            reason="provider review",
+            action="require_approval",
+        )
+
+        executing = self.queue.begin_execution(
+            request.approval_id,
+            resolved_by="manager-1",
+            comment="approve",
+        )
+
+        self.assertEqual(executing.status, APPROVAL_STATUS_EXECUTING)
+        self.assertEqual(executing.attempt_count, 1)
+        self.assertIsNotNone(executing.execution_attempt_id)
+        self.assertEqual(len(self.queue.list_pending()), 0)
+        with self.assertRaises(ValueError):
+            self.queue.begin_execution(request.approval_id, resolved_by="manager-2")
+
+        pending = self.queue.fail_execution(
+            request.approval_id,
+            error_type="provider_timeout",
+        )
+
+        self.assertEqual(pending.status, APPROVAL_STATUS_PENDING)
+        self.assertEqual(pending.attempt_count, 1)
+        self.assertEqual(pending.last_execution_error, "provider_timeout")
+        self.assertIsNotNone(pending.first_failed_at)
+        self.assertIsNotNone(pending.last_failed_at)
+        self.assertEqual(len(self.queue.list_pending()), 1)
+
+        retry = self.queue.begin_execution(request.approval_id, resolved_by="manager-1")
+        self.assertEqual(retry.status, APPROVAL_STATUS_EXECUTING)
+        self.assertEqual(retry.attempt_count, 2)
+        self.assertNotEqual(retry.execution_attempt_id, executing.execution_attempt_id)
 
     def test_defensive_copy_on_returned_objects(self) -> None:
         request = self.queue.create(
