@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from kai_security.approval.queue import (
     APPROVAL_STATUS_APPROVED,
     APPROVAL_STATUS_EXECUTING,
+    APPROVAL_STATUS_INVALID_CONTEXT,
     APPROVAL_STATUS_PENDING,
     APPROVAL_STATUS_REJECTED,
     InMemoryApprovalQueue,
@@ -148,11 +149,13 @@ class ApprovalQueueTests(unittest.TestCase):
             request.approval_id,
             expected_execution_attempt_id=executing.execution_attempt_id,
             error_type="provider_timeout",
+            retryable=True,
         )
 
         self.assertEqual(pending.status, APPROVAL_STATUS_PENDING)
         self.assertEqual(pending.attempt_count, 1)
         self.assertEqual(pending.last_execution_error, "provider_timeout")
+        self.assertTrue(pending.last_execution_retryable)
         self.assertIsNotNone(pending.first_failed_at)
         self.assertIsNotNone(pending.last_failed_at)
         self.assertEqual(len(self.queue.list_pending()), 1)
@@ -170,6 +173,39 @@ class ApprovalQueueTests(unittest.TestCase):
         self.assertEqual(approved.status, APPROVAL_STATUS_APPROVED)
         self.assertIsNone(approved.execution_started_at)
         self.assertIsNone(approved.last_execution_error)
+        self.assertIsNone(approved.last_execution_retryable)
+
+    def test_non_retryable_context_failure_blocks_reexecution_but_can_be_rejected(self) -> None:
+        request = self.queue.create(
+            request_id="req-invalid-context",
+            requested_by="alice",
+            reason="provider review",
+            action="require_approval",
+        )
+        executing = self.queue.begin_execution(request.approval_id, resolved_by="manager-1")
+
+        invalid = self.queue.fail_execution(
+            request.approval_id,
+            expected_execution_attempt_id=executing.execution_attempt_id,
+            error_type="stored_approval_context_error",
+            retryable=False,
+            final_status=APPROVAL_STATUS_INVALID_CONTEXT,
+        )
+
+        self.assertEqual(invalid.status, APPROVAL_STATUS_INVALID_CONTEXT)
+        self.assertFalse(invalid.last_execution_retryable)
+        self.assertEqual(len(self.queue.list_pending()), 1)
+        self.assertEqual(self.queue.list_pending()[0].status, APPROVAL_STATUS_INVALID_CONTEXT)
+        with self.assertRaises(ValueError):
+            self.queue.begin_execution(request.approval_id, resolved_by="manager-2")
+
+        rejected = self.queue.reject_pending(
+            request.approval_id,
+            resolved_by="manager-2",
+            comment="operator closed invalid context",
+        )
+        self.assertEqual(rejected.status, APPROVAL_STATUS_REJECTED)
+        self.assertEqual(len(self.queue.list_pending()), 0)
 
     def test_old_execution_attempt_cannot_finish_or_fail_new_attempt_after_recovery(self) -> None:
         request = self.queue.create(
@@ -238,6 +274,7 @@ class ApprovalQueueTests(unittest.TestCase):
         self.assertEqual(recovered[0].last_execution_started_at, stale_started_at)
         self.assertIsNone(recovered[0].execution_started_at)
         self.assertEqual(recovered[0].last_execution_error, "execution_timeout")
+        self.assertTrue(recovered[0].last_execution_retryable)
         self.assertEqual(len(self.queue.list_pending()), 1)
 
     def test_defensive_copy_on_returned_objects(self) -> None:

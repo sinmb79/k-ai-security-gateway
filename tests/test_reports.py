@@ -147,9 +147,11 @@ class ReportGeneratorTests(unittest.TestCase):
                 payload={
                     "approval_id": "approval-1",
                     "status": "failed",
+                    "approval_status": "invalid_context",
                     "provider_name": "external-openai-compatible",
-                    "error_type": "provider_http_error",
-                    "provider_status_code": 401,
+                    "error_type": "stored_approval_context_error",
+                    "stored_context_error_kind": "invalid_messages",
+                    "provider_status_code": None,
                     "provider_error_body_sha256": "abc123",
                     "provider_error_body_truncated": True,
                     "attempt_count": 1,
@@ -189,6 +191,8 @@ class ReportGeneratorTests(unittest.TestCase):
 
         self.assertIn("abc123", rendered)
         self.assertIn("provider_error_body_truncated", rendered)
+        self.assertIn("invalid_context", rendered)
+        self.assertIn("invalid_messages", rendered)
         self.assertIn("approval_execution_stale_recovered", rendered)
         self.assertIn("execution_timeout", rendered)
         self.assertIn("manager-1", rendered)

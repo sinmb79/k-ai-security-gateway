@@ -14,6 +14,7 @@ APPROVAL_STATUS_PENDING = "pending"
 APPROVAL_STATUS_EXECUTING = "executing"
 APPROVAL_STATUS_APPROVED = "approved"
 APPROVAL_STATUS_REJECTED = "rejected"
+APPROVAL_STATUS_INVALID_CONTEXT = "invalid_context"
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +36,7 @@ class ApprovalRequest:
     first_failed_at: datetime | None = None
     last_failed_at: datetime | None = None
     last_execution_error: str | None = None
+    last_execution_retryable: bool | None = None
     context: dict[str, object] | None = None
 
 
@@ -45,6 +47,7 @@ class InMemoryApprovalQueue:
     _status_executing: ClassVar[str] = APPROVAL_STATUS_EXECUTING
     _status_approved: ClassVar[str] = APPROVAL_STATUS_APPROVED
     _status_rejected: ClassVar[str] = APPROVAL_STATUS_REJECTED
+    _status_invalid_context: ClassVar[str] = APPROVAL_STATUS_INVALID_CONTEXT
 
     def __init__(self) -> None:
         self._requests: dict[str, ApprovalRequest] = {}
@@ -75,7 +78,9 @@ class InMemoryApprovalQueue:
     def list_pending(self) -> list[ApprovalRequest]:
         with self._lock:
             pending = [
-                request for request in self._requests.values() if request.status == self._status_pending
+                request
+                for request in self._requests.values()
+                if request.status in {self._status_pending, self._status_invalid_context}
             ]
             return [self._copy(request) for request in pending]
 
@@ -91,7 +96,7 @@ class InMemoryApprovalQueue:
             if request is None:
                 raise KeyError(f"Approval request not found: {approval_id}")
             if request.status != self._status_pending:
-                raise ValueError(f"Approval request already resolved or executing: {approval_id}")
+                raise ValueError(f"Approval request is not pending: {approval_id}")
             started_at = datetime.now(UTC)
             executing = replace(
                 request,
@@ -102,6 +107,7 @@ class InMemoryApprovalQueue:
                 attempt_count=request.attempt_count + 1,
                 execution_started_at=started_at,
                 last_execution_started_at=started_at,
+                last_execution_retryable=None,
             )
             self._requests[approval_id] = executing
             return self._copy(executing)
@@ -112,6 +118,8 @@ class InMemoryApprovalQueue:
         *,
         expected_execution_attempt_id: str,
         error_type: str,
+        retryable: bool | None = None,
+        final_status: str | None = None,
     ) -> ApprovalRequest:
         with self._lock:
             request = self._requests.get(approval_id)
@@ -121,16 +129,20 @@ class InMemoryApprovalQueue:
                 request,
                 expected_execution_attempt_id=expected_execution_attempt_id,
             )
+            status = final_status or self._status_pending
+            if status not in {self._status_pending, self._status_invalid_context}:
+                raise ValueError(f"Unsupported approval execution failure status: {status}")
             failed_at = datetime.now(UTC)
             pending = replace(
                 request,
-                status=self._status_pending,
+                status=status,
                 execution_started_at=None,
                 last_execution_started_at=request.execution_started_at
                 or request.last_execution_started_at,
                 first_failed_at=request.first_failed_at or failed_at,
                 last_failed_at=failed_at,
                 last_execution_error=error_type,
+                last_execution_retryable=retryable,
             )
             self._requests[approval_id] = pending
             return self._copy(pending)
@@ -159,6 +171,7 @@ class InMemoryApprovalQueue:
                 resolution_comment=comment,
                 execution_started_at=None,
                 last_execution_error=None,
+                last_execution_retryable=None,
                 context=deepcopy(request.context),
             )
             self._requests[approval_id] = resolved_request
@@ -175,7 +188,7 @@ class InMemoryApprovalQueue:
             request = self._requests.get(approval_id)
             if request is None:
                 raise KeyError(f"Approval request not found: {approval_id}")
-            if request.status != self._status_pending:
+            if request.status not in {self._status_pending, self._status_invalid_context}:
                 raise ValueError(f"Approval request already resolved or executing: {approval_id}")
             resolved_request = replace(
                 request,
@@ -184,6 +197,7 @@ class InMemoryApprovalQueue:
                 resolved_at=datetime.now(UTC),
                 resolution_comment=comment,
                 execution_started_at=None,
+                last_execution_retryable=None,
                 context=deepcopy(request.context),
             )
             self._requests[approval_id] = resolved_request
@@ -249,6 +263,7 @@ class InMemoryApprovalQueue:
                     first_failed_at=request.first_failed_at or current_time,
                     last_failed_at=current_time,
                     last_execution_error=reason,
+                    last_execution_retryable=True,
                 )
                 self._requests[approval_id] = recovered_request
                 recovered.append(self._copy(recovered_request))

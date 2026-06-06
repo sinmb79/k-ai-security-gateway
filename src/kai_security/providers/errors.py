@@ -13,6 +13,7 @@ class ProviderError(RuntimeError):
     retryable: bool = True
     body_sha256: str | None = None
     body_truncated: bool = False
+    metadata: dict[str, object] | None = None
 
     def __str__(self) -> str:
         return self.safe_message
