@@ -9,8 +9,10 @@ services:
     environment:
       - PYTHONPATH=/app/src
       - KAI_SECURITY_DB_PATH=/app/data/evidence.sqlite3
+      - KAI_SECURITY_CLIENT_TOKENS=${KAI_SECURITY_CLIENT_TOKENS:?set KAI_SECURITY_CLIENT_TOKENS}
       - KAI_SECURITY_APPROVER_TOKENS=${KAI_SECURITY_APPROVER_TOKENS:?set KAI_SECURITY_APPROVER_TOKENS}
       - KAI_SECURITY_ADMIN_TOKENS=${KAI_SECURITY_ADMIN_TOKENS:?set KAI_SECURITY_ADMIN_TOKENS}
+      - KAI_SECURITY_SEND_UPSTREAM_METADATA=${KAI_SECURITY_SEND_UPSTREAM_METADATA:-false}
     volumes:
       - kai-security-data:/app/data
     command: ["python", "-m", "uvicorn", "apps.gateway_api.main:app", "--host", "0.0.0.0", "--port", "8765"]

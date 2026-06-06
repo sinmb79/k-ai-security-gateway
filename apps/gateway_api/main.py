@@ -62,6 +62,7 @@ def create_gateway_service() -> GatewayService:
 
 gateway = create_gateway_service()
 _APPROVER_ROLES = {"admin", "security_manager", "approver"}
+_PROVIDER_REQUEST_OPTION_KEYS = ("temperature", "max_tokens", "top_p", "response_format")
 _MAX_AUDIT_EVENT_LIMIT = 1000
 _MAX_AUDIT_EVENT_EXPORT_LIMIT = 5000
 _DEFAULT_CHAIN_VERIFY_MAX_EVENTS = 50000
@@ -119,6 +120,7 @@ def evaluate_chat_completion_payload(
         canonical_prompt=canonical_prompt,
         effective_prompt=evaluation.effective_prompt,
     )
+    provider_options = _extract_provider_request_options(payload)
 
     if evaluation.decision.action in {PolicyAction.BLOCK, PolicyAction.REQUIRE_APPROVAL}:
         response = build_blocked_chat_response(request.request_id, evaluation.decision.reason)
@@ -133,6 +135,7 @@ def evaluate_chat_completion_payload(
                 messages=safe_messages,
                 effective_prompt=evaluation.effective_prompt,
                 gateway_security=gateway_security,
+                provider_options=provider_options,
             )
         )
         response = _guard_chat_completion_response(
@@ -209,6 +212,14 @@ def _build_safe_provider_messages(
     if action == "mask":
         return [{"role": "user", "content": effective_prompt}]
     return [{"role": "user", "content": canonical_prompt}]
+
+
+def _extract_provider_request_options(payload: dict[str, object]) -> dict[str, object]:
+    return {
+        key: deepcopy(payload[key])
+        for key in _PROVIDER_REQUEST_OPTION_KEYS
+        if key in payload
+    }
 
 
 def _validate_chat_completion_response(response: object) -> dict[str, object]:
@@ -366,25 +377,39 @@ def _serialize_policy_for_admin(policy) -> dict[str, object]:
     }
 
 
-def _parse_approver_tokens(raw: str) -> dict[str, tuple[str, str]]:
-    """Parse token registry: token=approver_id:role;other=approver_id:role."""
+def _parse_identity_tokens(raw: str) -> dict[str, tuple[str, str]]:
+    """Parse token registry: token=identity:scope;other=identity:scope."""
     registry: dict[str, tuple[str, str]] = {}
     for entry in raw.split(";"):
         entry = entry.strip()
         if not entry:
             continue
         token, separator, identity = entry.partition("=")
-        approver_id, role_separator, approver_role = identity.partition(":")
-        if not separator or not role_separator:
+        identity_id, scope_separator, scope = identity.partition(":")
+        scope = scope.strip()
+        identity_id = identity_id.strip()
+        if not separator or not scope_separator:
             continue
-        approver_role = approver_role.strip().lower()
-        if token and approver_id and approver_role in _APPROVER_ROLES:
-            registry[token.strip()] = (approver_id.strip(), approver_role)
+        if token and identity_id and scope:
+            registry[token.strip()] = (identity_id, scope)
     return registry
+
+
+def _parse_approver_tokens(raw: str) -> dict[str, tuple[str, str]]:
+    """Parse token registry: token=approver_id:role;other=approver_id:role."""
+    return {
+        token: (approver_id, role.lower())
+        for token, (approver_id, role) in _parse_identity_tokens(raw).items()
+        if role.lower() in _APPROVER_ROLES
+    }
 
 
 def _admin_token_registry() -> dict[str, tuple[str, str]]:
     return _parse_approver_tokens(os.environ.get("KAI_SECURITY_ADMIN_TOKENS", ""))
+
+
+def _client_token_registry() -> dict[str, tuple[str, str]]:
+    return _parse_identity_tokens(os.environ.get("KAI_SECURITY_CLIENT_TOKENS", ""))
 
 
 def _extract_bearer_token(authorization: str | None) -> str:
@@ -411,6 +436,25 @@ def _require_admin(token: str | None = None, authorization: str | None = None) -
     if admin is None:
         raise PermissionError("admin bearer token is not authorized")
     return admin
+
+
+def _require_client(token: str | None = None, authorization: str | None = None) -> tuple[str, str]:
+    registry = _client_token_registry()
+    candidate = _extract_token(token=token, authorization=authorization)
+    if not candidate:
+        raise PermissionError("client bearer token is required")
+    client = registry.get(candidate)
+    if client is None:
+        raise PermissionError("client bearer token is not authorized")
+    return client
+
+
+def _with_client_context(payload: dict[str, object], client: tuple[str, str]) -> dict[str, object]:
+    client_id, department = client
+    enriched = dict(payload)
+    enriched.setdefault("user_id", client_id)
+    enriched.setdefault("department", department)
+    return enriched
 
 
 def _require_approver(
@@ -632,7 +676,7 @@ def _chain_verification_report(evidence_store: object) -> tuple[bool | None, dic
 
 
 if FastAPI is not None:
-    app = FastAPI(title="K-AI Security Gateway", version="0.1.0")
+    app = FastAPI(title="K-AI Security Gateway", version="0.1.1")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     @app.get("/")
@@ -644,9 +688,16 @@ if FastAPI is not None:
         return FileResponse(str(_STATIC_DIR / "admin.html"))
 
     @app.post("/v1/security/evaluate")
-    def evaluate(payload: dict[str, object]) -> dict[str, object]:
+    def evaluate(
+        payload: dict[str, object],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, object]:
         try:
+            client = _require_client(authorization=authorization)
+            payload = _with_client_context(payload, client)
             request = build_gateway_request(payload)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         evaluation = gateway.evaluate(request)
@@ -689,9 +740,16 @@ if FastAPI is not None:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/v1/chat/completions")
-    def chat_completions(payload: dict[str, object]) -> dict[str, object]:
+    def chat_completions(
+        payload: dict[str, object],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, object]:
         try:
+            client = _require_client(authorization=authorization)
+            payload = _with_client_context(payload, client)
             return evaluate_chat_completion_payload(payload)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except RuntimeError as exc:

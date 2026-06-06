@@ -16,6 +16,7 @@ from apps.gateway_api.main import (
     _parse_approver_tokens,
     _require_admin,
     _require_approver,
+    _require_client,
     app,
     build_gateway_request,
     create_gateway_service,
@@ -33,6 +34,22 @@ except ModuleNotFoundError:  # pragma: no cover - optional FastAPI test dependen
 
 
 class GatewayApiContractTests(unittest.TestCase):
+    def _set_env(self, key: str, value: str) -> None:
+        old_value = os.environ.get(key)
+        os.environ[key] = value
+
+        def restore() -> None:
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
+
+        self.addCleanup(restore)
+
+    def _client_headers(self, token: str = "client-token") -> dict[str, str]:
+        self._set_env("KAI_SECURITY_CLIENT_TOKENS", "client-token=client-1:security")
+        return {"Authorization": f"Bearer {token}"}
+
     def test_build_gateway_request_maps_policy_context(self) -> None:
         request = build_gateway_request(
             {
@@ -122,6 +139,25 @@ class GatewayApiContractTests(unittest.TestCase):
                 os.environ.pop("KAI_SECURITY_ADMIN_TOKENS", None)
             else:
                 os.environ["KAI_SECURITY_ADMIN_TOKENS"] = old_value
+
+    def test_require_client_uses_server_token_registry(self) -> None:
+        self._set_env("KAI_SECURITY_CLIENT_TOKENS", "client-token=client-1:security")
+
+        self.assertEqual(
+            _require_client(authorization="Bearer client-token"),
+            ("client-1", "security"),
+        )
+        with self.assertRaises(PermissionError):
+            _require_client(authorization="Bearer bad-token")
+        with self.assertRaises(PermissionError):
+            _require_client()
+
+    def test_admin_token_does_not_substitute_for_client_token(self) -> None:
+        self._set_env("KAI_SECURITY_ADMIN_TOKENS", "admin-token=manager-1:admin")
+        self._set_env("KAI_SECURITY_CLIENT_TOKENS", "client-token=client-1:security")
+
+        with self.assertRaises(PermissionError):
+            _require_client(authorization="Bearer admin-token")
 
     def test_extract_bearer_token_rejects_non_bearer_values(self) -> None:
         self.assertEqual(_extract_bearer_token("Bearer admin-token"), "admin-token")
@@ -240,6 +276,7 @@ class GatewayApiContractTests(unittest.TestCase):
         with patch("apps.gateway_api.main.gateway", service):
             response = client.post(
                 "/v1/security/evaluate",
+                headers=self._client_headers(),
                 json={"prompt": raw_prompt, "user_id": "alice"},
             )
 
@@ -248,6 +285,27 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertNotIn("effective_prompt", payload)
         self.assertNotIn(raw_prompt, response.text)
         self.assertIn("prompt_changed", payload)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_security_evaluate_requires_client_bearer_token(self) -> None:
+        client = TestClient(app)
+        self._set_env("KAI_SECURITY_CLIENT_TOKENS", "client-token=client-1:security")
+
+        missing = client.post("/v1/security/evaluate", json={"prompt": "safe"})
+        bad = client.post(
+            "/v1/security/evaluate",
+            headers={"Authorization": "Bearer bad-token"},
+            json={"prompt": "safe"},
+        )
+        good = client.post(
+            "/v1/security/evaluate",
+            headers={"Authorization": "Bearer client-token"},
+            json={"prompt": "safe"},
+        )
+
+        self.assertEqual(missing.status_code, 403)
+        self.assertEqual(bad.status_code, 403)
+        self.assertEqual(good.status_code, 200)
 
     def test_chat_completion_masked_messages_are_passed_to_adapter(self) -> None:
         adapter = Mock()
@@ -278,6 +336,45 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertIn("[PHONE]", str(sent_messages[0]["content"]))
         self.assertNotIn("010-1234-5678", str(sent_messages[0]["content"]))
         self.assertEqual(response["choices"][0]["message"]["content"], "provider response")
+
+    def test_chat_completion_passes_only_allowlisted_provider_options(self) -> None:
+        adapter = Mock()
+        adapter.complete.return_value = {
+            "id": "adapter-1",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "provider response"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+
+        with patch("apps.gateway_api.main.resolve_provider_adapter", return_value=adapter):
+            evaluate_chat_completion_payload(
+                {
+                    "model": "gateway-test",
+                    "temperature": 0.2,
+                    "max_tokens": 32,
+                    "top_p": 0.9,
+                    "response_format": {"type": "json_object"},
+                    "stream": True,
+                    "tools": [{"type": "function"}],
+                    "messages": [{"role": "user", "content": "safe content"}],
+                },
+                service=GatewayService(),
+            )
+
+        self.assertEqual(
+            adapter.complete.call_args.kwargs["provider_options"],
+            {
+                "temperature": 0.2,
+                "max_tokens": 32,
+                "top_p": 0.9,
+                "response_format": {"type": "json_object"},
+            },
+        )
 
     def test_chat_completion_masks_sensitive_provider_response(self) -> None:
         adapter = Mock()
@@ -669,6 +766,7 @@ class GatewayApiContractTests(unittest.TestCase):
         with patch("apps.gateway_api.main.resolve_provider_adapter", return_value=adapter):
             response = client.post(
                 "/v1/chat/completions",
+                headers=self._client_headers(),
                 json={"model": "gateway-test", "messages": [{"role": "user", "content": "safe prompt"}]},
             )
 
@@ -684,6 +782,7 @@ class GatewayApiContractTests(unittest.TestCase):
         with patch("apps.gateway_api.main.resolve_provider_adapter", return_value=adapter):
             response = client.post(
                 "/v1/chat/completions",
+                headers=self._client_headers(),
                 json={"model": "gateway-test", "messages": [{"role": "user", "content": "safe prompt"}]},
             )
 
@@ -713,6 +812,7 @@ class GatewayApiContractTests(unittest.TestCase):
         with patch("apps.gateway_api.main.resolve_provider_adapter", return_value=adapter):
             response = client.post(
                 "/v1/chat/completions",
+                headers=self._client_headers(),
                 json={"model": "gateway-test", "messages": [{"role": "user", "content": "safe prompt"}]},
             )
 
@@ -748,6 +848,7 @@ class GatewayApiContractTests(unittest.TestCase):
         with patch("apps.gateway_api.main.resolve_provider_adapter", return_value=adapter):
             response = client.post(
                 "/v1/chat/completions",
+                headers=self._client_headers(),
                 json={"model": "gateway-test", "messages": [{"role": "user", "content": "safe prompt"}]},
             )
 
@@ -779,6 +880,7 @@ class GatewayApiContractTests(unittest.TestCase):
                 mock_urlopen.return_value = _BrokenHTTPResponse()
                 response = client.post(
                     "/v1/chat/completions",
+                    headers=self._client_headers(),
                     json={"model": "gateway-test", "messages": [{"role": "user", "content": "safe prompt"}]},
                 )
         finally:
@@ -789,6 +891,44 @@ class GatewayApiContractTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.json()["detail"], "provider request failed")
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_chat_completion_endpoint_requires_client_bearer_token(self) -> None:
+        adapter = Mock()
+        adapter.complete.return_value = {
+            "id": "adapter-1",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "provider response"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        client = TestClient(app)
+        self._set_env("KAI_SECURITY_ADMIN_TOKENS", "admin-token=manager-1:admin")
+        self._set_env("KAI_SECURITY_CLIENT_TOKENS", "client-token=client-1:security")
+
+        with patch("apps.gateway_api.main.resolve_provider_adapter", return_value=adapter):
+            missing = client.post(
+                "/v1/chat/completions",
+                json={"model": "gateway-test", "messages": [{"role": "user", "content": "safe prompt"}]},
+            )
+            admin = client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"model": "gateway-test", "messages": [{"role": "user", "content": "safe prompt"}]},
+            )
+            good = client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer client-token"},
+                json={"model": "gateway-test", "messages": [{"role": "user", "content": "safe prompt"}]},
+            )
+
+        self.assertEqual(missing.status_code, 403)
+        self.assertEqual(admin.status_code, 403)
+        self.assertEqual(good.status_code, 200)
 
     def test_create_gateway_service_loads_policy_path(self) -> None:
         old_value = os.environ.get("KAI_SECURITY_POLICY_PATH")

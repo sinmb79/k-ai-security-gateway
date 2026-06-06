@@ -8,6 +8,10 @@ if (-not $env:PYTHONPATH) {
     $env:PYTHONPATH = Join-Path (Get-Location) "src"
 }
 
+if (-not $env:KAI_SECURITY_CLIENT_TOKENS) {
+    throw "KAI_SECURITY_CLIENT_TOKENS is required. Example: client-token=client-1:security"
+}
+
 if (-not $env:KAI_SECURITY_APPROVER_TOKENS) {
     throw "KAI_SECURITY_APPROVER_TOKENS is required. Example: token=manager-1:security_manager"
 }

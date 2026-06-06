@@ -22,6 +22,7 @@ class ChatCompletionProvider(Protocol):
         messages: list[dict[str, object]],
         effective_prompt: str,
         gateway_security: dict[str, object],
+        provider_options: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """Complete a chat request and return an OpenAI-like response payload."""
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Iterable
 
 from kai_security.models import DataGrade, ModelZone, PolicyAction, RiskKind
 
@@ -38,94 +38,95 @@ class PolicySet:
 
 def default_policy_set() -> PolicySet:
     """Return the built-in policy set used when no external file is configured."""
+    policies = (
+        PolicyRule(
+            id="policy-001-block-high-risk",
+            priority=10,
+            when={"finding_kinds_any": [RiskKind.PROMPT_INJECTION]},
+            action=PolicyAction.BLOCK,
+            reason="high-risk prompt-injection or risk threshold exceeded",
+        ),
+        PolicyRule(
+            id="policy-001b-block-risk-threshold",
+            priority=11,
+            when={
+                "min_risk_score": 0.85,
+                "finding_kinds_none": [RiskKind.KOREAN_PII],
+            },
+            action=PolicyAction.BLOCK,
+            reason="high-risk prompt-injection or risk threshold exceeded",
+        ),
+        PolicyRule(
+            id="policy-002-restricted-external-require-approval",
+            priority=20,
+            when={
+                "data_grade": DataGrade.RESTRICTED,
+                "model_zone": ModelZone.EXTERNAL,
+            },
+            action=PolicyAction.REQUIRE_APPROVAL,
+            reason="restricted data must be approved before routing to external models",
+        ),
+        PolicyRule(
+            id="policy-003-data-exfiltration-external-require-approval",
+            priority=30,
+            when={
+                "finding_kinds_any": [RiskKind.DATA_EXFILTRATION],
+                "model_zone": ModelZone.EXTERNAL,
+            },
+            action=PolicyAction.REQUIRE_APPROVAL,
+            reason="data exfiltration indicators require approval before external model routing",
+        ),
+        PolicyRule(
+            id="policy-003b-document-risk-external-require-approval",
+            priority=35,
+            when={
+                "finding_kinds_any": [RiskKind.DOCUMENT_RISK],
+                "model_zone": ModelZone.EXTERNAL,
+                "min_risk_score": 0.7,
+            },
+            action=PolicyAction.REQUIRE_APPROVAL,
+            reason="document or RAG content contains high-risk hidden instructions",
+        ),
+        PolicyRule(
+            id="policy-004-external-korean-pii-mask",
+            priority=40,
+            when={
+                "finding_kinds_any": [RiskKind.KOREAN_PII],
+                "model_zone": ModelZone.EXTERNAL,
+            },
+            action=PolicyAction.MASK,
+            reason="korean pii found for external model traffic",
+        ),
+        PolicyRule(
+            id="policy-005-confidential-external-route-private",
+            priority=38,
+            when={
+                "data_grade": DataGrade.CONFIDENTIAL,
+                "model_zone": ModelZone.EXTERNAL,
+            },
+            action=PolicyAction.ROUTE_PRIVATE,
+            reason="confidential data must be routed to private model zone",
+            route_model_zone=ModelZone.PRIVATE,
+        ),
+        PolicyRule(
+            id="policy-006-allow-low-risk",
+            priority=60,
+            when={"no_findings": True},
+            action=PolicyAction.ALLOW,
+            reason="no high-risk findings; low-risk request allowed",
+        ),
+        PolicyRule(
+            id="policy-007-default-allow",
+            priority=1000,
+            when={},
+            action=PolicyAction.ALLOW,
+            reason="default allow",
+        ),
+    )
     return PolicySet(
         version=_DEFAULT_VERSION,
         source="default",
-        policies=(
-            PolicyRule(
-                id="policy-001-block-high-risk",
-                priority=10,
-                when={"finding_kinds_any": [RiskKind.PROMPT_INJECTION]},
-                action=PolicyAction.BLOCK,
-                reason="high-risk prompt-injection or risk threshold exceeded",
-            ),
-            PolicyRule(
-                id="policy-001b-block-risk-threshold",
-                priority=11,
-                when={
-                    "min_risk_score": 0.85,
-                    "finding_kinds_none": [RiskKind.KOREAN_PII],
-                },
-                action=PolicyAction.BLOCK,
-                reason="high-risk prompt-injection or risk threshold exceeded",
-            ),
-            PolicyRule(
-                id="policy-002-restricted-external-require-approval",
-                priority=20,
-                when={
-                    "data_grade": DataGrade.RESTRICTED,
-                    "model_zone": ModelZone.EXTERNAL,
-                },
-                action=PolicyAction.REQUIRE_APPROVAL,
-                reason="restricted data must be approved before routing to external models",
-            ),
-            PolicyRule(
-                id="policy-003-data-exfiltration-external-require-approval",
-                priority=30,
-                when={
-                    "finding_kinds_any": [RiskKind.DATA_EXFILTRATION],
-                    "model_zone": ModelZone.EXTERNAL,
-                },
-                action=PolicyAction.REQUIRE_APPROVAL,
-                reason="data exfiltration indicators require approval before external model routing",
-            ),
-            PolicyRule(
-                id="policy-003b-document-risk-external-require-approval",
-                priority=35,
-                when={
-                    "finding_kinds_any": [RiskKind.DOCUMENT_RISK],
-                    "model_zone": ModelZone.EXTERNAL,
-                    "min_risk_score": 0.7,
-                },
-                action=PolicyAction.REQUIRE_APPROVAL,
-                reason="document or RAG content contains high-risk hidden instructions",
-            ),
-            PolicyRule(
-                id="policy-004-external-korean-pii-mask",
-                priority=40,
-                when={
-                    "finding_kinds_any": [RiskKind.KOREAN_PII],
-                    "model_zone": ModelZone.EXTERNAL,
-                },
-                action=PolicyAction.MASK,
-                reason="korean pii found for external model traffic",
-            ),
-            PolicyRule(
-                id="policy-005-confidential-external-route-private",
-                priority=50,
-                when={
-                    "data_grade": DataGrade.CONFIDENTIAL,
-                    "model_zone": ModelZone.EXTERNAL,
-                },
-                action=PolicyAction.ROUTE_PRIVATE,
-                reason="confidential data must be routed to private model zone",
-                route_model_zone=ModelZone.PRIVATE,
-            ),
-            PolicyRule(
-                id="policy-006-allow-low-risk",
-                priority=60,
-                when={"no_findings": True},
-                action=PolicyAction.ALLOW,
-                reason="no high-risk findings; low-risk request allowed",
-            ),
-            PolicyRule(
-                id="policy-007-default-allow",
-                priority=1000,
-                when={},
-                action=PolicyAction.ALLOW,
-                reason="default allow",
-            ),
-        ),
+        policies=_order_policies(policies),
     )
 
 
@@ -158,12 +159,7 @@ def load_policy_set_from_path(path: str | Path) -> PolicySet:
     parsed_policies = []
     for index, raw_policy in enumerate(raw_policies):
         parsed_policies.append((index, _parse_policy(raw_policy)))
-    ordered_policies = tuple(
-        policy for _, policy in sorted(
-            parsed_policies,
-            key=lambda item: (item[1].priority, item[0]),
-        )
-    )
+    ordered_policies = _order_policies(policy for _, policy in parsed_policies)
     if not ordered_policies:
         raise ValueError("policy set must contain at least one policy")
 
@@ -171,6 +167,16 @@ def load_policy_set_from_path(path: str | Path) -> PolicySet:
         version=version,
         source=str(path),
         policies=ordered_policies,
+    )
+
+
+def _order_policies(policies: Iterable[PolicyRule]) -> tuple[PolicyRule, ...]:
+    return tuple(
+        policy
+        for _, policy in sorted(
+            enumerate(policies),
+            key=lambda item: (item[1].priority, item[0]),
+        )
     )
 
 

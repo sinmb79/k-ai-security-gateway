@@ -3,8 +3,10 @@
 로컬에서 API를 바로 실행하려면 `scripts/run-dev.ps1`를 사용하세요.
 
 ```powershell
+$env:KAI_SECURITY_CLIENT_TOKENS = "client-token=client-1:security"
 $env:KAI_SECURITY_APPROVER_TOKENS = "approver-token=manager-1:security_manager"
 $env:KAI_SECURITY_ADMIN_TOKENS = "admin-token=manager-1:security_manager"
+$env:KAI_SECURITY_SEND_UPSTREAM_METADATA = "false"
 $env:KAI_SECURITY_DB_PATH = ".\data\evidence.sqlite3"
 ./scripts/run-dev.ps1
 ```
@@ -23,6 +25,7 @@ Docker 환경에서는 8765 포트로 공개됩니다.
 먼저 `.env.example`을 참고해 `.env`를 만들거나, 현재 PowerShell 세션에 필수 토큰을 주입하세요.
 
 ```powershell
+$env:KAI_SECURITY_CLIENT_TOKENS = "client-token-1=client-1:security"
 $env:KAI_SECURITY_APPROVER_TOKENS = "approver-token-1=manager-1:security_manager"
 $env:KAI_SECURITY_ADMIN_TOKENS = "admin-token-1=manager-1:security_manager"
 docker compose config
@@ -35,8 +38,10 @@ docker compose up --build
 `docker-compose.yml`의 예시 환경변수:
 
 ```dotenv
+KAI_SECURITY_CLIENT_TOKENS=client-token-1=client-1:security
 KAI_SECURITY_APPROVER_TOKENS=approver-token-1=manager-1:security_manager;approver-token-2=admin-1:admin
 KAI_SECURITY_ADMIN_TOKENS=admin-token-1=manager-1:security_manager;admin-token-2=admin-1:admin
+KAI_SECURITY_SEND_UPSTREAM_METADATA=false
 PYTHONPATH=/app/src
 KAI_SECURITY_DB_PATH=/app/data/evidence.sqlite3
 ```
@@ -48,18 +53,21 @@ KAI_SECURITY_DB_PATH=/app/data/evidence.sqlite3
 
 Docker Compose는 `kai-security-data` 볼륨에 `evidence.sqlite3`를 저장합니다.
 
-## 승인 토큰 설정
+## Client/Admin/승인 토큰 설정
 
-승인 처리 API는 `KAI_SECURITY_APPROVER_TOKENS`, 관리자 조회 API와 대시보드는 `KAI_SECURITY_ADMIN_TOKENS`를 사용합니다.
-두 값은 다음 형식으로 지정합니다.
+핵심 client API(`/v1/chat/completions`, `/v1/security/evaluate`)는 `KAI_SECURITY_CLIENT_TOKENS`,
+승인 처리 API는 `KAI_SECURITY_APPROVER_TOKENS`, 관리자 조회 API와 대시보드는
+`KAI_SECURITY_ADMIN_TOKENS`를 사용합니다. 값은 다음 형식으로 지정합니다. client token의
+두 번째 값은 department/scope, admin/approver token의 두 번째 값은 role입니다.
 
 ```
-token=approver-id:role;token2=approver-id2:role2
+token=identity-id:scope-or-role;token2=identity-id2:scope-or-role2
 ```
 
 예시:
 
 ```powershell
+$env:KAI_SECURITY_CLIENT_TOKENS = "client-token-1=client-1:security"
 $env:KAI_SECURITY_APPROVER_TOKENS = "token-1=manager-1:security_manager;token-2=admin-1:admin"
 $env:KAI_SECURITY_ADMIN_TOKENS = "admin-token-1=manager-1:security_manager"
 ```
@@ -86,8 +94,10 @@ Invoke-RestMethod -Method Get `
 서버가 실행된 상태에서 다음을 실행해 핵심 엔드포인트를 검증합니다.
 
 ```powershell
-./scripts/smoke-test.ps1
-./scripts/smoke-test.ps1 -BaseUrl "http://127.0.0.1:8765" -AdminToken "admin-token-1"
+./scripts/smoke-test.ps1 `
+  -BaseUrl "http://127.0.0.1:8765" `
+  -AdminToken "admin-token-1" `
+  -ClientToken "client-token-1"
 ```
 
 체크 항목:

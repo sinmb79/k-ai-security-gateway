@@ -7,11 +7,11 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app/src
 ENV KAI_SECURITY_DB_PATH=/app/data/evidence.sqlite3
 
-RUN pip install --no-cache-dir fastapi uvicorn
-
 COPY pyproject.toml ./
 COPY src ./src
 COPY apps ./apps
+
+RUN pip install --no-cache-dir ".[api]"
 
 RUN mkdir -p /app/data
 

@@ -1,15 +1,16 @@
 # MVP Release Candidate Status
 
-Updated: 2026-06-05
+Updated: 2026-06-06
 
 ## Current Scope
 
 K-AI Security Gateway is now a local MVP release candidate for controlled
-OpenAI-compatible AI usage.
+OpenAI-compatible subset AI usage.
 
 Implemented:
 
-- OpenAI-compatible `/v1/chat/completions` gateway
+- OpenAI-compatible subset `/v1/chat/completions` gateway
+- Client Bearer-token protection for `/v1/chat/completions` and `/v1/security/evaluate`
 - Provider routing for external, private, domestic SaaS, and on-prem model zones
 - Korean PII detection and masking for RRN-like IDs, foreigner registration IDs,
   phone numbers, email, cards, business numbers, account numbers, corporate
@@ -41,7 +42,10 @@ docker compose --env-file .env.example config --quiet
 With a server running:
 
 ```powershell
-./scripts/smoke-test.ps1 -BaseUrl "http://127.0.0.1:8765" -AdminToken "admin-token-1"
+./scripts/smoke-test.ps1 `
+  -BaseUrl "http://127.0.0.1:8765" `
+  -AdminToken "admin-token-1" `
+  -ClientToken "client-token-1"
 ```
 
 The smoke script verifies masking, policy simulation, evidence package generation,
@@ -62,7 +66,7 @@ It uses:
 
 These are intentionally outside this MVP release candidate or deferred hardening:
 
-- Streaming chat completion pass-through
+- Streaming chat completion and tool-calling pass-through
 - Cursor-based audit export for very large evidence stores
 - Label-specific policy DSL conditions such as account-only approval rules
 - Full policy editing/version publishing in the dashboard

@@ -1,6 +1,7 @@
 param (
     [string]$BaseUrl = "http://127.0.0.1:8765",
-    [string]$AdminToken = "admin-smoke-token"
+    [string]$AdminToken = "admin-smoke-token",
+    [string]$ClientToken = "client-smoke-token"
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,7 +63,10 @@ $chatPayloadJson = @"
 }
 "@
 
-$chatResponse = Invoke-JsonPost "/v1/chat/completions" $chatPayloadJson
+$chatResponse = Invoke-JsonPost `
+    "/v1/chat/completions" `
+    $chatPayloadJson `
+    @{ Authorization = "Bearer $ClientToken" }
 
 if (-not $chatResponse.gateway_security) {
     Fail "/v1/chat/completions response is missing gateway_security."
