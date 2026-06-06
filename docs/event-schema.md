@@ -10,6 +10,7 @@
 - `approval_resolved`
 - `approval_executed` (optional when an approved chat completion is forwarded)
 - `approval_execution_failed` (optional when approved forwarding fails)
+- `approval_execution_stale_recovered` (optional when an old `executing` item is returned to `pending`)
 - `response_analyzed` (optional when a provider response is returned)
 - `request_finalized`
 
@@ -107,6 +108,7 @@ an approved request is being forwarded.
 - `error_type` (`provider_timeout`, `provider_invalid_response`, `provider_http_error`,
   or `provider_runtime_error`)
 - `provider_status_code` (number or null)
+- `provider_error_body_sha256` (string or null)
 - `attempt_count` (number)
 - `execution_attempt_id` (string)
 - `first_failed_at` (string)
@@ -116,6 +118,32 @@ an approved request is being forwarded.
 Provider execution failures do not resolve or consume the approval request. The
 approval remains `pending` so an authorized approver can retry after the provider
 or network issue is fixed.
+
+Provider raw error bodies are not copied into exception messages, API responses, or
+evidence package timelines. When a provider returns an HTTP error body, the event may
+include `provider_error_body_sha256` only for correlation. Retryability is status-aware:
+network timeouts, `408`, `409`, `425`, `429`, and `5xx` are retryable; ordinary `4xx`
+provider errors such as `400`, `401`, `403`, `404`, and `422` are not.
+
+### `approval_execution_stale_recovered`
+
+- `approval_id` (string)
+- `route` (object or null)
+- `status` (`pending`)
+- `provider_name` (string, optional)
+- `attempt_count` (number)
+- `stale_execution_attempt_id` (string)
+- `execution_started_at` (string or null)
+- `recovered_at` (string or null)
+- `first_failed_at` (string or null)
+- `last_failed_at` (string or null)
+- `reason` (string)
+- `retryable` (boolean)
+
+This event is emitted when an admin calls `POST /v1/approvals/recover-stale` and an
+`executing` approval has exceeded the timeout. The in-memory MVP returns the item to
+`pending` for manual retry; production deployments should replace this with a
+transactional persistent approval backend.
 
 ### `response_analyzed`
 

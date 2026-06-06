@@ -277,7 +277,13 @@ audit event search, and CSV/JSONL export behavior.
   key so duplicate approval attempts do not create duplicate model completions.
 - If approved provider execution fails, the approval returns to `pending` and can
   be retried. Failure evidence records sanitized error type, provider status code,
-  attempt count, and retryability metadata.
+  attempt count, provider error body hash, and status-aware retryability metadata.
+- Provider raw error bodies are not placed in exception messages, API responses, or
+  evidence package timelines. HTTP error bodies are reduced to SHA-256 hashes for
+  correlation when available.
+- Admins can call `POST /v1/approvals/recover-stale` to return stale in-memory
+  `executing` approvals to `pending`; the recovery is recorded as
+  `approval_execution_stale_recovered`.
 - Docker Compose binds the API to `127.0.0.1:8765` by default. Use a reverse proxy,
   TLS, and explicit network allowlists before exposing it beyond localhost.
 - Evidence reports are designed for review support. They are not legal advice or a
@@ -291,6 +297,12 @@ See [SECURITY.md](SECURITY.md) for reporting and handling guidance.
 - Production SSO/RBAC integration is not implemented yet.
 - Original-client callback or polling delivery for approved completions is not
   implemented yet.
+- Approval execution safety is single-process and in-memory in this MVP. Production
+  multi-worker or multi-replica deployments need a transactional persistent approval
+  backend such as SQLite/Postgres with compare-and-set state transitions.
+- Provider idempotency keys are attempt-scoped in the MVP. A future persistent
+  execution ledger should separate logical approval idempotency from per-attempt
+  audit evidence.
 - Very large audit exports need cursor-based pagination.
 - Policy editing/version publishing in the dashboard is not complete.
 - Encrypted raw-prompt vault separation and retention enforcement are future hardening

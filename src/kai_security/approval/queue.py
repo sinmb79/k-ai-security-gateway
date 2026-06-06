@@ -31,6 +31,7 @@ class ApprovalRequest:
     execution_attempt_id: str | None = None
     attempt_count: int = 0
     execution_started_at: datetime | None = None
+    last_execution_started_at: datetime | None = None
     first_failed_at: datetime | None = None
     last_failed_at: datetime | None = None
     last_execution_error: str | None = None
@@ -91,6 +92,7 @@ class InMemoryApprovalQueue:
                 raise KeyError(f"Approval request not found: {approval_id}")
             if request.status != self._status_pending:
                 raise ValueError(f"Approval request already resolved or executing: {approval_id}")
+            started_at = datetime.now(UTC)
             executing = replace(
                 request,
                 status=self._status_executing,
@@ -98,7 +100,8 @@ class InMemoryApprovalQueue:
                 resolution_comment=comment,
                 execution_attempt_id=self._generate_id(),
                 attempt_count=request.attempt_count + 1,
-                execution_started_at=datetime.now(UTC),
+                execution_started_at=started_at,
+                last_execution_started_at=started_at,
             )
             self._requests[approval_id] = executing
             return self._copy(executing)
@@ -115,6 +118,8 @@ class InMemoryApprovalQueue:
                 request,
                 status=self._status_pending,
                 execution_started_at=None,
+                last_execution_started_at=request.execution_started_at
+                or request.last_execution_started_at,
                 first_failed_at=request.first_failed_at or failed_at,
                 last_failed_at=failed_at,
                 last_execution_error=error_type,
@@ -122,10 +127,10 @@ class InMemoryApprovalQueue:
             self._requests[approval_id] = pending
             return self._copy(pending)
 
-    def resolve(
+    def finish_execution_success(
         self,
         approval_id: str,
-        approved: bool,
+        *,
         resolved_by: str,
         comment: str = "",
     ) -> ApprovalRequest:
@@ -133,15 +138,37 @@ class InMemoryApprovalQueue:
             request = self._requests.get(approval_id)
             if request is None:
                 raise KeyError(f"Approval request not found: {approval_id}")
-            expected_statuses = {self._status_pending}
-            if approved:
-                expected_statuses.add(self._status_executing)
-            if request.status not in expected_statuses:
-                raise ValueError(f"Approval request already resolved or executing: {approval_id}")
-
+            if request.status != self._status_executing:
+                raise ValueError(f"Approval request must be executing before approval: {approval_id}")
             resolved_request = replace(
                 request,
-                status=self._status_approved if approved else self._status_rejected,
+                status=self._status_approved,
+                resolved_by=resolved_by,
+                resolved_at=datetime.now(UTC),
+                resolution_comment=comment,
+                execution_started_at=None,
+                last_execution_error=None,
+                context=deepcopy(request.context),
+            )
+            self._requests[approval_id] = resolved_request
+            return self._copy(resolved_request)
+
+    def reject_pending(
+        self,
+        approval_id: str,
+        *,
+        resolved_by: str,
+        comment: str = "",
+    ) -> ApprovalRequest:
+        with self._lock:
+            request = self._requests.get(approval_id)
+            if request is None:
+                raise KeyError(f"Approval request not found: {approval_id}")
+            if request.status != self._status_pending:
+                raise ValueError(f"Approval request already resolved or executing: {approval_id}")
+            resolved_request = replace(
+                request,
+                status=self._status_rejected,
                 resolved_by=resolved_by,
                 resolved_at=datetime.now(UTC),
                 resolution_comment=comment,
@@ -150,6 +177,55 @@ class InMemoryApprovalQueue:
             )
             self._requests[approval_id] = resolved_request
             return self._copy(resolved_request)
+
+    def resolve(
+        self,
+        approval_id: str,
+        approved: bool,
+        resolved_by: str,
+        comment: str = "",
+    ) -> ApprovalRequest:
+        if approved:
+            return self.finish_execution_success(
+                approval_id,
+                resolved_by=resolved_by,
+                comment=comment,
+            )
+        return self.reject_pending(approval_id, resolved_by=resolved_by, comment=comment)
+
+    def recover_stale_executions(
+        self,
+        *,
+        timeout_seconds: float,
+        reason: str = "execution_timeout",
+        now: datetime | None = None,
+    ) -> list[ApprovalRequest]:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        current_time = (now or datetime.now(UTC)).astimezone(UTC)
+        recovered: list[ApprovalRequest] = []
+        with self._lock:
+            for approval_id, request in list(self._requests.items()):
+                if request.status != self._status_executing or request.execution_started_at is None:
+                    continue
+                started_at = request.execution_started_at
+                if started_at.tzinfo is None:
+                    started_at = started_at.replace(tzinfo=UTC)
+                elapsed = (current_time - started_at.astimezone(UTC)).total_seconds()
+                if elapsed < timeout_seconds:
+                    continue
+                recovered_request = replace(
+                    request,
+                    status=self._status_pending,
+                    execution_started_at=None,
+                    last_execution_started_at=started_at,
+                    first_failed_at=request.first_failed_at or current_time,
+                    last_failed_at=current_time,
+                    last_execution_error=reason,
+                )
+                self._requests[approval_id] = recovered_request
+                recovered.append(self._copy(recovered_request))
+        return recovered
 
     def get(self, approval_id: str) -> ApprovalRequest | None:
         with self._lock:

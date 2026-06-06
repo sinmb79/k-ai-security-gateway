@@ -1,5 +1,7 @@
 import unittest
 
+from datetime import UTC, datetime
+
 from kai_security.gateway.service import GatewayService
 from kai_security.models import AuditEvent, GatewayRequest
 from kai_security.reports.generator import (
@@ -71,9 +73,13 @@ class ReportGeneratorTests(unittest.TestCase):
         request = GatewayRequest(prompt="API key and secret exposed", user_id="alice")
         service.evaluate(request)
         approval = service.approval_queue.list_pending()[0]
-        resolved = service.approval_queue.resolve(
-            approval_id=approval.approval_id,
-            approved=True,
+        executing = service.approval_queue.begin_execution(
+            approval.approval_id,
+            resolved_by="manager-1",
+            comment="contains raw customer prompt",
+        )
+        resolved = service.approval_queue.finish_execution_success(
+            executing.approval_id,
             resolved_by="manager-1",
             comment="contains raw customer prompt",
         )
@@ -129,6 +135,58 @@ class ReportGeneratorTests(unittest.TestCase):
         self.assertNotIn("raw route prompt", rendered)
         self.assertNotIn("raw route response", rendered)
         self.assertEqual(report["approval"]["approval_resolved"]["status"], "approved")
+
+    def test_request_evidence_package_keeps_sanitized_failure_and_recovery_metadata(self) -> None:
+        now = datetime.now(UTC)
+        events = [
+            AuditEvent(
+                event_type="approval_execution_failed",
+                request_id="req-provider-failure",
+                timestamp=now,
+                payload={
+                    "approval_id": "approval-1",
+                    "status": "failed",
+                    "provider_name": "external-openai-compatible",
+                    "error_type": "provider_http_error",
+                    "provider_status_code": 401,
+                    "provider_error_body_sha256": "abc123",
+                    "attempt_count": 1,
+                    "execution_attempt_id": "attempt-1",
+                    "first_failed_at": now.isoformat(),
+                    "last_failed_at": now.isoformat(),
+                    "retryable": False,
+                    "raw_error_body": "raw secret body",
+                },
+            ),
+            AuditEvent(
+                event_type="approval_execution_stale_recovered",
+                request_id="req-provider-failure",
+                timestamp=now,
+                payload={
+                    "approval_id": "approval-1",
+                    "status": "pending",
+                    "attempt_count": 1,
+                    "stale_execution_attempt_id": "attempt-1",
+                    "execution_started_at": now.isoformat(),
+                    "recovered_at": now.isoformat(),
+                    "reason": "execution_timeout",
+                    "retryable": True,
+                    "raw_error_body": "raw stale secret",
+                },
+            ),
+        ]
+
+        report = generate_request_evidence_package(
+            events,
+            request_id="req-provider-failure",
+        )
+        rendered = str(report)
+
+        self.assertIn("abc123", rendered)
+        self.assertIn("approval_execution_stale_recovered", rendered)
+        self.assertIn("execution_timeout", rendered)
+        self.assertNotIn("raw secret body", rendered)
+        self.assertNotIn("raw stale secret", rendered)
 
     def test_request_evidence_package_without_events_reports_missing(self) -> None:
         report = generate_request_evidence_package([], request_id="missing-request")

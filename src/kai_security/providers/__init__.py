@@ -11,6 +11,7 @@ from os import getenv
 from typing import Iterable, Protocol
 
 from kai_security.model_router import ModelRoute
+from kai_security.providers.errors import ProviderError, retryable_for_status
 
 
 class ChatCompletionProvider(Protocol):
@@ -90,3 +91,13 @@ def _coerce_timeout_seconds(raw: str) -> float:
 
 def iterate_provider_env_names(providers: Iterable[str] = ()) -> dict[str, ProviderConfig]:
     return {provider: _provider_env_variables(provider) for provider in providers}
+
+
+__all__ = [
+    "ChatCompletionProvider",
+    "ProviderConfig",
+    "ProviderError",
+    "iterate_provider_env_names",
+    "resolve_provider_adapter",
+    "retryable_for_status",
+]
