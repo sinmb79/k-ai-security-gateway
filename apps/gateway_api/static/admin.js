@@ -221,6 +221,15 @@ async function resolveApproval(approvalId, approved, comment) {
   });
 }
 
+async function resetApprovalExecutionError(approvalId, reason) {
+  return fetchJson(`/v1/approvals/${encodeURIComponent(approvalId)}/reset-execution-error`, {
+    admin: true,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+}
+
 async function refresh() {
   if (!adminToken) {
     clearApprovalActionState();
@@ -351,7 +360,7 @@ async function handleApprovalActionClick(event) {
   const button = event.target;
   if (!(button instanceof HTMLButtonElement)) return;
   const action = button.dataset.action;
-  if (action !== "approve" && action !== "reject") return;
+  if (action !== "approve" && action !== "reject" && action !== "reset-error") return;
 
   const item = button.closest(".approval-item");
   if (!item) return;
@@ -373,7 +382,7 @@ async function handleApprovalActionClick(event) {
     return;
   }
 
-  if (!approverToken) {
+  if (action !== "reset-error" && !approverToken) {
     setApprovalItemUiState(
       approvalId,
       APPROVAL_STATUS.ERROR,
@@ -391,19 +400,33 @@ async function handleApprovalActionClick(event) {
   const selectedComment = state.approvalDraftComments[approvalId] || "";
   const fallbackComment = getDefaultApprovalComment();
   const comment = selectedComment.trim() || fallbackComment;
+  if (action === "reset-error" && !comment.trim()) {
+    const message = "재시도 허용 사유가 필요합니다";
+    setApprovalItemUiState(approvalId, APPROVAL_STATUS.ERROR, message);
+    setApprovalActionStatus(message, APPROVAL_STATUS.ERROR);
+    if (statusControl) {
+      statusControl.textContent = message;
+      statusControl.classList.remove("status-idle", "status-processing", "status-success", "status-error");
+      statusControl.classList.add("status-error");
+    }
+    return;
+  }
   const approved = action === "approve";
   actionButtons.forEach((actionButton) => {
     actionButton.disabled = true;
   });
-  setApprovalItemUiState(approvalId, APPROVAL_STATUS.PROCESSING, "처리 중...");
+  const processingMessage = action === "reset-error" ? "재시도 허용 중..." : "처리 중...";
+  setApprovalItemUiState(approvalId, APPROVAL_STATUS.PROCESSING, processingMessage);
   if (statusControl) {
-    statusControl.textContent = "처리 중...";
+    statusControl.textContent = processingMessage;
     statusControl.classList.remove("status-idle", "status-processing", "status-success", "status-error");
     statusControl.classList.add("status-processing");
   }
 
   try {
-    const result = await resolveApproval(approvalId, approved, comment);
+    const result = action === "reset-error"
+      ? await resetApprovalExecutionError(approvalId, comment)
+      : await resolveApproval(approvalId, approved, comment);
     const completionContent = approved ? extractCompletionContent(result.completion) : "";
     if (completionContent) {
       state.lastApprovalCompletion = {
@@ -413,11 +436,13 @@ async function handleApprovalActionClick(event) {
         content: completionContent,
       };
     }
-    const successMessage = approved
-      ? completionContent
-        ? "승인 처리 및 모델 응답 수신 완료"
-        : "승인 처리 완료"
-      : "반려 처리 완료";
+    const successMessage = action === "reset-error"
+      ? "재시도 허용 완료"
+      : approved
+        ? completionContent
+          ? "승인 처리 및 모델 응답 수신 완료"
+          : "승인 처리 완료"
+        : "반려 처리 완료";
     setApprovalItemUiState(
       approvalId,
       APPROVAL_STATUS.SUCCESS,
@@ -720,24 +745,39 @@ function renderApprovals() {
     actions.className = "approval-item-actions";
     const approveButton = document.createElement("button");
     const rejectButton = document.createElement("button");
+    const resetButton = document.createElement("button");
     approveButton.type = "button";
     rejectButton.type = "button";
+    resetButton.type = "button";
     approveButton.textContent = "승인";
     rejectButton.textContent = "반려";
+    resetButton.textContent = "재시도 허용";
     approveButton.dataset.action = "approve";
     rejectButton.dataset.action = "reject";
+    resetButton.dataset.action = "reset-error";
     const isBusy = statusState.status === APPROVAL_STATUS.PROCESSING;
     const baseDisabled = !adminToken || !approverToken || isBusy;
+    const adminActionDisabled = !adminToken || isBusy;
     const resolveDisabled =
       approval.can_resolve === false ||
       approval.can_execute === false ||
       approval.retryable === false;
     const rejectDisabled = approval.can_reject === false;
+    const resetVisible =
+      approval.status === "pending" &&
+      approval.retryable === false &&
+      !!approval.last_execution_error;
+    const resetDisabled = !resetVisible;
     approveButton.disabled = baseDisabled || resolveDisabled;
     approveButton.title = resolveDisabled ? "Operator review required" : "";
     rejectButton.disabled = baseDisabled || rejectDisabled;
+    resetButton.disabled = adminActionDisabled || resetDisabled;
+    resetButton.title = resetVisible ? "사유 코멘트가 필요합니다" : "";
 
     actions.append(approveButton, rejectButton);
+    if (resetVisible) {
+      actions.append(resetButton);
+    }
     item.append(header, reason, metadata);
     if (executionNotice.textContent) {
       item.append(executionNotice);

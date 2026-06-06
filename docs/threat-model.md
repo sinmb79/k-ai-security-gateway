@@ -38,6 +38,8 @@
   valid non-provider approvals must use an explicit `policy_evaluation` context.
 - Non-retryable stored context failures must remain visible for operator review
   while blocking repeated approved execution attempts.
+- Non-retryable provider execution failures must require an explicit admin reset
+  with a reason before approved execution can be retried.
 - Operator-facing approval payloads must distinguish resolution, provider
   execution, and rejection capabilities so UI controls cannot infer the wrong
   action from a single ambiguous flag.

@@ -22,6 +22,9 @@ Implemented:
   attempt-aware `pending -> executing -> approved` execution state transitions
 - Approval execution failure rollback, stale `executing` recovery, sanitized
   provider error evidence with capped body hashes, and status-aware retryability metadata
+- Admin-only non-retryable provider failure reset via
+  `POST /v1/approvals/{approval_id}/reset-execution-error`, with required reason
+  and `approval_execution_error_reset` audit evidence
 - Post-provider attempt conflict audit evidence with structured `409` responses
   that do not mutate newer approval state
 - Non-retryable `stored_approval_context_error` handling for invalid stored approval
@@ -31,7 +34,8 @@ Implemented:
 - Approval capability hints split into `can_resolve`, `can_execute_provider`,
   `can_reject`, and `resolution_mode`, with `can_execute` retained for compatibility
 - Failure-domain tagging for approval failure evidence: `gateway_state`,
-  `provider_transport`, `provider_response`, and `approval_state_conflict`
+  `gateway_runtime`, `approval_backend`, `provider_transport`, `provider_response`,
+  `approval_state_conflict`, and `unknown`
 - Explicit `policy_evaluation` context for non-provider approval resolutions so
   missing or unsupported approval context cannot silently succeed
 - Tamper-evident audit evidence store with in-memory and SQLite backends

@@ -96,11 +96,17 @@ sequenceDiagram
             GW->>Q: Mark approval approved
             GW->>A: Append approval execution evidence
             GW-->>Admin: Completion in approval resolve response
-        else provider failure
+        else retryable provider failure
             M-->>GW: Temporary provider failure
             GW->>Q: Return approval to pending
             GW->>A: Append approval_execution_failed
             GW-->>Admin: 502, approval remains pending for retry
+        else non-retryable provider failure
+            M-->>GW: Provider error such as 401, 403, or 422
+            GW->>Q: Keep pending and lock re-execution
+            GW->>A: Append retryable=false failure evidence
+            Admin->>GW: Reset execution error with reason
+            GW->>A: Append approval_execution_error_reset
         end
     else allowed path
         GW->>M: Forward masked or routed request
@@ -137,7 +143,7 @@ Create a virtual environment and install API dependencies:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install fastapi uvicorn pytest
+python -m pip install -e ".[api,dev]"
 ```
 
 Set local client, admin, and approver tokens:
@@ -279,10 +285,14 @@ audit event search, and CSV/JSONL export behavior.
   cannot approve or fail a newer execution attempt.
 - Post-provider attempt mismatches return a structured `409` response and append
   `approval_execution_attempt_conflict` without mutating the newer approval state.
-- If approved provider execution fails, the approval returns to `pending` and can
-  be retried. Failure evidence records sanitized error type, provider status code,
-  attempt count, capped provider error body hash, body truncation status, and
-  status-aware retryability metadata.
+- If approved provider execution fails, the approval returns to `pending`. Failure
+  evidence records sanitized error type, provider status code, attempt count,
+  capped provider error body hash, body truncation status, and status-aware
+  retryability metadata. Provider failures with `retryable=false` cannot be
+  re-approved immediately; after fixing provider configuration, an admin must call
+  `POST /v1/approvals/{approval_id}/reset-execution-error` with a reason before
+  `can_resolve` opens again. The reset is recorded as
+  `approval_execution_error_reset`.
 - Stored approval context validation failures are recorded as non-retryable
   `stored_approval_context_error` gateway state errors and do not call the provider.
   They return structured `409` details, move the approval to `invalid_context`,
@@ -292,8 +302,9 @@ audit event search, and CSV/JSONL export behavior.
   `can_execute_provider`, `can_reject`, and `resolution_mode`; the older
   `can_execute` field remains as a compatibility alias for `can_resolve`.
 - Approval failure evidence includes `failure_domain` values such as
-  `gateway_state`, `provider_transport`, `provider_response`, and
-  `approval_state_conflict` for cleaner SIEM/report filtering.
+  `gateway_state`, `gateway_runtime`, `approval_backend`, `provider_transport`,
+  `provider_response`, `approval_state_conflict`, and `unknown` for cleaner
+  SIEM/report filtering.
 - Policy-only approvals created by `/v1/security/evaluate` use an explicit
   `policy_evaluation` context, so missing or unsupported approval context no
   longer silently succeeds.
