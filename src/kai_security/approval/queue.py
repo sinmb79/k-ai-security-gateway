@@ -97,6 +97,10 @@ class InMemoryApprovalQueue:
                 raise KeyError(f"Approval request not found: {approval_id}")
             if request.status != self._status_pending:
                 raise ValueError(f"Approval request is not pending: {approval_id}")
+            if request.last_execution_retryable is False:
+                raise ValueError(
+                    f"Approval execution error requires admin reset: {approval_id}"
+                )
             started_at = datetime.now(UTC)
             executing = replace(
                 request,
@@ -176,6 +180,27 @@ class InMemoryApprovalQueue:
             )
             self._requests[approval_id] = resolved_request
             return self._copy(resolved_request)
+
+    def reset_execution_error(self, approval_id: str) -> ApprovalRequest:
+        with self._lock:
+            request = self._requests.get(approval_id)
+            if request is None:
+                raise KeyError(f"Approval request not found: {approval_id}")
+            if request.status != self._status_pending:
+                raise ValueError(f"Approval request is not pending: {approval_id}")
+            if request.last_execution_retryable is not False or not request.last_execution_error:
+                raise ValueError(
+                    f"Approval request has no non-retryable execution error: {approval_id}"
+                )
+            if request.last_execution_error == "stored_approval_context_error":
+                raise ValueError(f"Stored approval context errors cannot be reset: {approval_id}")
+            reset_request = replace(
+                request,
+                last_execution_retryable=True,
+                context=deepcopy(request.context),
+            )
+            self._requests[approval_id] = reset_request
+            return self._copy(reset_request)
 
     def reject_pending(
         self,

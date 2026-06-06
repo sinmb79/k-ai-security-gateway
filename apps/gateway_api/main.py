@@ -88,6 +88,7 @@ _STORED_CONTEXT_ERROR_KINDS = frozenset(
         "invalid_provider_options",
         "invalid_gateway_metadata",
         "invalid_prompt",
+        "unknown_context_error",
     }
 )
 _APP_DIR = Path(__file__).resolve().parent
@@ -473,7 +474,7 @@ def _execute_approved_context(
 
 
 def _stored_approval_context_error(kind: str = "missing_context") -> ProviderError:
-    normalized_kind = kind if kind in _STORED_CONTEXT_ERROR_KINDS else "unsupported_context_type"
+    normalized_kind = kind if kind in _STORED_CONTEXT_ERROR_KINDS else "unknown_context_error"
     return ProviderError(
         error_type="stored_approval_context_error",
         retryable=False,
@@ -512,11 +513,15 @@ def _route_payload_from_approval_context(approval: ApprovalRequest) -> dict[str,
 def _failure_domain_for_error_type(error_type: str) -> str:
     if error_type == "stored_approval_context_error":
         return "gateway_state"
+    if error_type == "gateway_runtime_error":
+        return "gateway_runtime"
+    if error_type == "approval_backend_error":
+        return "approval_backend"
     if error_type == "provider_invalid_response":
         return "provider_response"
     if error_type in {"provider_timeout", "provider_http_error", "provider_runtime_error"}:
         return "provider_transport"
-    return "provider_transport"
+    return "unknown"
 
 
 def _provider_error_summary(error: RuntimeError) -> dict[str, object]:
@@ -585,6 +590,54 @@ def _append_approval_execution_failed_event(
             request_id=approval.request_id,
             timestamp=datetime.now(UTC),
             payload=payload,
+        )
+    )
+
+
+def _approval_execution_error_reset_reason(payload: dict[str, object]) -> str:
+    reason = str(payload.get("reason", "")).strip()
+    if not reason:
+        raise ValueError("reason is required")
+    return reason
+
+
+def _append_approval_execution_error_reset_event(
+    *,
+    approval: ApprovalRequest,
+    previous_error_type: str | None,
+    previous_retryable: bool | None,
+    reason: str,
+    service: GatewayService,
+    reset_by: str,
+    reset_by_role: str,
+) -> None:
+    route = _route_payload_from_approval_context(approval)
+    service.evidence_store.append(
+        AuditEvent(
+            event_type="approval_execution_error_reset",
+            request_id=approval.request_id,
+            timestamp=datetime.now(UTC),
+            payload={
+                "approval_id": approval.approval_id,
+                "route": route,
+                "status": approval.status,
+                "provider_name": route.get("provider") if isinstance(route, dict) else None,
+                "attempt_count": approval.attempt_count,
+                "previous_error_type": previous_error_type,
+                "previous_retryable": previous_retryable,
+                "retryable": approval.last_execution_retryable,
+                "failure_domain": _failure_domain_for_error_type(previous_error_type or ""),
+                "first_failed_at": approval.first_failed_at.isoformat()
+                if approval.first_failed_at
+                else None,
+                "last_failed_at": approval.last_failed_at.isoformat()
+                if approval.last_failed_at
+                else None,
+                "reason": reason,
+                "reset_by": reset_by,
+                "reset_by_role": reset_by_role,
+                "auth_method": "admin_bearer_token",
+            },
         )
     )
 
@@ -1177,7 +1230,7 @@ def _chain_verification_report(evidence_store: object) -> tuple[bool | None, dic
 
 
 if FastAPI is not None:
-    app = FastAPI(title="K-AI Security Gateway", version="0.1.9")
+    app = FastAPI(title="K-AI Security Gateway", version="0.1.10")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     @app.get("/")
@@ -1327,6 +1380,39 @@ if FastAPI is not None:
             if dry_run
             else [],
         }
+
+    @app.post("/v1/approvals/{approval_id}/reset-execution-error")
+    def reset_approval_execution_error(
+        approval_id: str,
+        payload: dict[str, object],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, object]:
+        try:
+            admin_id, admin_role = _require_admin(authorization=authorization)
+            reason = _approval_execution_error_reset_reason(payload)
+            previous = gateway.approval_queue.get(approval_id)
+            if previous is None:
+                raise KeyError(f"Approval request not found: {approval_id}")
+            previous_error_type = previous.last_execution_error
+            previous_retryable = previous.last_execution_retryable
+            approval = gateway.approval_queue.reset_execution_error(approval_id)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            status_code = 400 if str(exc) == "reason is required" else 409
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        _append_approval_execution_error_reset_event(
+            approval=approval,
+            previous_error_type=previous_error_type,
+            previous_retryable=previous_retryable,
+            reason=reason,
+            service=gateway,
+            reset_by=admin_id,
+            reset_by_role=admin_role,
+        )
+        return _approval_payload(approval)
 
     @app.post("/v1/approvals/{approval_id}/resolve")
     def resolve_approval(

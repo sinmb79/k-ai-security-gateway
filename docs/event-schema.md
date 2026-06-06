@@ -10,6 +10,7 @@
 - `approval_resolved`
 - `approval_executed` (optional when an approved chat completion is forwarded)
 - `approval_execution_failed` (optional when approved forwarding fails)
+- `approval_execution_error_reset` (optional when an admin re-enables a non-retryable provider failure)
 - `approval_execution_stale_recovered` (optional when an old `executing` item is returned to `pending`)
 - `approval_execution_attempt_conflict` (optional when an old execution attempt conflicts with the current approval state)
 - `response_analyzed` (optional when a provider response is returned)
@@ -117,7 +118,8 @@ Approval API payloads include operator capability hints:
 - `status` (`failed`)
 - `approval_status` (`pending` or `invalid_context`)
 - `provider_name` (string, optional)
-- `failure_domain` (`gateway_state`, `provider_transport`, or `provider_response`)
+- `failure_domain` (`gateway_state`, `gateway_runtime`, `approval_backend`,
+  `provider_transport`, `provider_response`, or `unknown`)
 - `error_type` (`provider_timeout`, `provider_invalid_response`, `provider_http_error`,
   `provider_runtime_error`, or `stored_approval_context_error`)
 - `stored_context_error_kind` (string, optional for `stored_approval_context_error`)
@@ -132,7 +134,10 @@ Approval API payloads include operator capability hints:
 
 Retryable provider execution failures do not resolve or consume the approval
 request. The approval remains `pending` so an authorized approver can retry after
-the provider or network issue is fixed.
+the provider or network issue is fixed. Non-retryable provider failures also
+remain `pending`, but `can_resolve=false` and a direct retry returns `409` until
+an admin calls `POST /v1/approvals/{approval_id}/reset-execution-error` with a
+non-empty reason.
 
 Provider raw error bodies are not copied into exception messages, API responses, or
 evidence package timelines. When a provider returns an HTTP error body, the event may
@@ -147,7 +152,33 @@ to `invalid_context`, return structured HTTP `409` detail with
 `action_required=operator_review`, and do not call the upstream provider.
 Allowed `stored_context_error_kind` values are `missing_context`,
 `unsupported_context_type`, `invalid_route`, `invalid_messages`,
-`invalid_provider_options`, `invalid_gateway_metadata`, and `invalid_prompt`.
+`invalid_provider_options`, `invalid_gateway_metadata`, `invalid_prompt`, and
+`unknown_context_error`.
+
+### `approval_execution_error_reset`
+
+- `approval_id` (string)
+- `route` (object or null)
+- `status` (`pending`)
+- `provider_name` (string, optional)
+- `attempt_count` (number)
+- `previous_error_type` (string)
+- `previous_retryable` (boolean, normally `false`)
+- `retryable` (boolean, `true` after reset)
+- `failure_domain` (same enum as `approval_execution_failed`)
+- `first_failed_at` (string or null)
+- `last_failed_at` (string or null)
+- `reason` (string, required in the reset request)
+- `reset_by` (string)
+- `reset_by_role` (string)
+- `auth_method` (`admin_bearer_token`)
+
+This event is emitted when an admin explicitly re-enables retry for a pending
+approval whose last provider execution failure was non-retryable. The previous
+error type remains on the approval payload for operator context, but
+`last_execution_retryable` is changed to `true`, so `can_resolve` becomes `true`
+again. Stored approval context errors in `invalid_context` are not reset by this
+endpoint.
 
 ### `approval_execution_stale_recovered`
 
