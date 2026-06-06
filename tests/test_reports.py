@@ -80,6 +80,7 @@ class ReportGeneratorTests(unittest.TestCase):
         )
         resolved = service.approval_queue.finish_execution_success(
             executing.approval_id,
+            expected_execution_attempt_id=executing.execution_attempt_id,
             resolved_by="manager-1",
             comment="contains raw customer prompt",
         )
@@ -150,6 +151,7 @@ class ReportGeneratorTests(unittest.TestCase):
                     "error_type": "provider_http_error",
                     "provider_status_code": 401,
                     "provider_error_body_sha256": "abc123",
+                    "provider_error_body_truncated": True,
                     "attempt_count": 1,
                     "execution_attempt_id": "attempt-1",
                     "first_failed_at": now.isoformat(),
@@ -171,6 +173,9 @@ class ReportGeneratorTests(unittest.TestCase):
                     "recovered_at": now.isoformat(),
                     "reason": "execution_timeout",
                     "retryable": True,
+                    "recovered_by": "manager-1",
+                    "recovered_by_role": "admin",
+                    "auth_method": "admin_bearer_token",
                     "raw_error_body": "raw stale secret",
                 },
             ),
@@ -183,8 +188,10 @@ class ReportGeneratorTests(unittest.TestCase):
         rendered = str(report)
 
         self.assertIn("abc123", rendered)
+        self.assertIn("provider_error_body_truncated", rendered)
         self.assertIn("approval_execution_stale_recovered", rendered)
         self.assertIn("execution_timeout", rendered)
+        self.assertIn("manager-1", rendered)
         self.assertNotIn("raw secret body", rendered)
         self.assertNotIn("raw stale secret", rendered)
 

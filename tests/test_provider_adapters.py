@@ -1,5 +1,6 @@
 import json
 import unittest
+from hashlib import sha256
 from io import BytesIO
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -11,6 +12,7 @@ from kai_security.providers.errors import ProviderError
 from kai_security.providers.echo import EchoChatCompletionAdapter
 from kai_security.providers.openai_compatible import (
     OpenAICompatibleHTTPAdapter,
+    _MAX_ERROR_BODY_BYTES,
     _build_completion_url,
 )
 
@@ -294,6 +296,34 @@ class ProviderAdapterTests(unittest.TestCase):
         self.assertIn("HTTP 401", str(context.exception))
         self.assertNotIn("raw secret body", str(context.exception))
         self.assertIsNotNone(context.exception.body_sha256)
+        self.assertFalse(context.exception.body_truncated)
+
+    @patch("kai_security.providers.openai_compatible.urlopen")
+    def test_openai_adapter_http_error_body_hash_is_capped(self, mock_urlopen) -> None:
+        raw_body = b"x" * (_MAX_ERROR_BODY_BYTES + 128)
+        mock_urlopen.side_effect = HTTPError(
+            url="https://provider.local/v1/chat/completions",
+            code=500,
+            msg="Server Error",
+            hdrs={},
+            fp=BytesIO(raw_body),
+        )
+        adapter = OpenAICompatibleHTTPAdapter(endpoint="https://provider.local", api_key="secret")
+
+        with self.assertRaises(ProviderError) as context:
+            adapter.complete(
+                request_id="req-1",
+                model="mock-model",
+                messages=[{"role": "user", "content": "hello"}],
+                effective_prompt="hello",
+                gateway_security={"action": "allow"},
+            )
+
+        self.assertEqual(
+            context.exception.body_sha256,
+            sha256(raw_body[:_MAX_ERROR_BODY_BYTES]).hexdigest(),
+        )
+        self.assertTrue(context.exception.body_truncated)
 
     @patch("kai_security.providers.openai_compatible.urlopen")
     def test_openai_adapter_http_503_is_retryable(self, mock_urlopen) -> None:

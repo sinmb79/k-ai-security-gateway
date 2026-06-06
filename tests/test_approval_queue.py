@@ -58,6 +58,7 @@ class ApprovalQueueTests(unittest.TestCase):
         )
         approved = self.queue.finish_execution_success(
             executing.approval_id,
+            expected_execution_attempt_id=executing.execution_attempt_id,
             resolved_by="manager",
             comment="approved",
         )
@@ -94,7 +95,11 @@ class ApprovalQueueTests(unittest.TestCase):
             action="route_external",
         )
         executing = self.queue.begin_execution(request.approval_id, resolved_by="manager")
-        self.queue.finish_execution_success(executing.approval_id, resolved_by="manager")
+        self.queue.finish_execution_success(
+            executing.approval_id,
+            expected_execution_attempt_id=executing.execution_attempt_id,
+            resolved_by="manager",
+        )
 
         with self.assertRaises(ValueError):
             self.queue.reject_pending(request.approval_id, resolved_by="manager")
@@ -141,6 +146,7 @@ class ApprovalQueueTests(unittest.TestCase):
 
         pending = self.queue.fail_execution(
             request.approval_id,
+            expected_execution_attempt_id=executing.execution_attempt_id,
             error_type="provider_timeout",
         )
 
@@ -156,10 +162,56 @@ class ApprovalQueueTests(unittest.TestCase):
         self.assertEqual(retry.attempt_count, 2)
         self.assertNotEqual(retry.execution_attempt_id, executing.execution_attempt_id)
 
-        approved = self.queue.finish_execution_success(retry.approval_id, resolved_by="manager-1")
+        approved = self.queue.finish_execution_success(
+            retry.approval_id,
+            expected_execution_attempt_id=retry.execution_attempt_id,
+            resolved_by="manager-1",
+        )
         self.assertEqual(approved.status, APPROVAL_STATUS_APPROVED)
         self.assertIsNone(approved.execution_started_at)
         self.assertIsNone(approved.last_execution_error)
+
+    def test_old_execution_attempt_cannot_finish_or_fail_new_attempt_after_recovery(self) -> None:
+        request = self.queue.create(
+            request_id="req-aba",
+            requested_by="alice",
+            reason="provider review",
+            action="require_approval",
+        )
+        old_attempt = self.queue.begin_execution(request.approval_id, resolved_by="manager-1")
+        now = datetime.now(UTC)
+        stale_started_at = now - timedelta(seconds=600)
+        self.queue._requests[request.approval_id] = replace(
+            self.queue._requests[request.approval_id],
+            execution_started_at=stale_started_at,
+            last_execution_started_at=stale_started_at,
+        )
+        self.queue.recover_stale_executions(timeout_seconds=300, now=now)
+        new_attempt = self.queue.begin_execution(request.approval_id, resolved_by="manager-2")
+
+        with self.assertRaises(ValueError):
+            self.queue.finish_execution_success(
+                request.approval_id,
+                expected_execution_attempt_id=old_attempt.execution_attempt_id,
+                resolved_by="manager-1",
+            )
+        with self.assertRaises(ValueError):
+            self.queue.fail_execution(
+                request.approval_id,
+                expected_execution_attempt_id=old_attempt.execution_attempt_id,
+                error_type="provider_timeout",
+            )
+
+        current = self.queue.get(request.approval_id)
+        self.assertIsNotNone(current)
+        self.assertEqual(current.status, APPROVAL_STATUS_EXECUTING)
+        self.assertEqual(current.execution_attempt_id, new_attempt.execution_attempt_id)
+        approved = self.queue.finish_execution_success(
+            request.approval_id,
+            expected_execution_attempt_id=new_attempt.execution_attempt_id,
+            resolved_by="manager-2",
+        )
+        self.assertEqual(approved.status, APPROVAL_STATUS_APPROVED)
 
     def test_recover_stale_executions_returns_old_executing_requests_to_pending(self) -> None:
         request = self.queue.create(

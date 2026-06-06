@@ -109,6 +109,7 @@ an approved request is being forwarded.
   or `provider_runtime_error`)
 - `provider_status_code` (number or null)
 - `provider_error_body_sha256` (string or null)
+- `provider_error_body_truncated` (boolean)
 - `attempt_count` (number)
 - `execution_attempt_id` (string)
 - `first_failed_at` (string)
@@ -121,9 +122,10 @@ or network issue is fixed.
 
 Provider raw error bodies are not copied into exception messages, API responses, or
 evidence package timelines. When a provider returns an HTTP error body, the event may
-include `provider_error_body_sha256` only for correlation. Retryability is status-aware:
-network timeouts, `408`, `409`, `425`, `429`, and `5xx` are retryable; ordinary `4xx`
-provider errors such as `400`, `401`, `403`, `404`, and `422` are not.
+include a capped `provider_error_body_sha256` and `provider_error_body_truncated` only
+for correlation. Retryability is status-aware: network timeouts, `408`, `409`, `425`,
+`429`, and `5xx` are retryable; ordinary `4xx` provider errors such as `400`, `401`,
+`403`, `404`, and `422` are not. Invalid provider response shape is non-retryable.
 
 ### `approval_execution_stale_recovered`
 
@@ -139,11 +141,18 @@ provider errors such as `400`, `401`, `403`, `404`, and `422` are not.
 - `last_failed_at` (string or null)
 - `reason` (string)
 - `retryable` (boolean)
+- `recovered_by` (string)
+- `recovered_by_role` (string)
+- `auth_method` (`admin_bearer_token`)
 
 This event is emitted when an admin calls `POST /v1/approvals/recover-stale` and an
 `executing` approval has exceeded the timeout. The in-memory MVP returns the item to
 `pending` for manual retry; production deployments should replace this with a
 transactional persistent approval backend.
+
+`POST /v1/approvals/recover-stale` supports `dry_run=true` for preview. Timeout values
+below the default require `force=true`, and recovery reasons are restricted to
+`execution_timeout`, `process_restart`, or `operator_recovery`.
 
 ### `response_analyzed`
 

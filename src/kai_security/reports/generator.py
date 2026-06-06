@@ -74,6 +74,7 @@ _SAFE_TIMELINE_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
         "error_type",
         "provider_status_code",
         "provider_error_body_sha256",
+        "provider_error_body_truncated",
         "attempt_count",
         "execution_attempt_id",
         "first_failed_at",
@@ -93,6 +94,9 @@ _SAFE_TIMELINE_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
         "last_failed_at",
         "reason",
         "retryable",
+        "recovered_by",
+        "recovered_by_role",
+        "auth_method",
     ),
     "request_finalized": ("action", "effective_prompt_changed"),
 }

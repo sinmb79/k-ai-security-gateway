@@ -73,6 +73,11 @@ _MAX_AUDIT_EVENT_LIMIT = 1000
 _MAX_AUDIT_EVENT_EXPORT_LIMIT = 5000
 _DEFAULT_CHAIN_VERIFY_MAX_EVENTS = 50000
 _DEFAULT_STALE_EXECUTION_TIMEOUT_SECONDS = 300.0
+_MIN_STALE_EXECUTION_TIMEOUT_SECONDS = 60.0
+_MAX_STALE_EXECUTION_RECOVERIES = 100
+_STALE_EXECUTION_RECOVERY_REASONS = frozenset(
+    {"execution_timeout", "process_restart", "operator_recovery"}
+)
 _APP_DIR = Path(__file__).resolve().parent
 _STATIC_DIR = _APP_DIR / "static"
 _PROVIDER_STATUS_RE = re.compile(r"provider request failed:\s+(?P<status>\d{3})")
@@ -271,26 +276,50 @@ def _extract_provider_request_options(payload: dict[str, object]) -> dict[str, o
 
 def _validate_chat_completion_response(response: object) -> dict[str, object]:
     if not isinstance(response, dict):
-        raise RuntimeError("provider response has invalid JSON shape")
+        raise ProviderError(
+            error_type="provider_invalid_response",
+            retryable=False,
+            safe_message="provider response has invalid JSON shape",
+        )
 
     choices = response.get("choices")
     if not isinstance(choices, list) or len(choices) == 0:
-        raise RuntimeError("provider response has invalid JSON shape")
+        raise ProviderError(
+            error_type="provider_invalid_response",
+            retryable=False,
+            safe_message="provider response has invalid JSON shape",
+        )
 
     for choice in choices:
         if not isinstance(choice, dict):
-            raise RuntimeError("provider response has invalid JSON shape")
+            raise ProviderError(
+                error_type="provider_invalid_response",
+                retryable=False,
+                safe_message="provider response has invalid JSON shape",
+            )
 
         message = choice.get("message")
         if not isinstance(message, dict):
-            raise RuntimeError("provider response has invalid JSON shape")
+            raise ProviderError(
+                error_type="provider_invalid_response",
+                retryable=False,
+                safe_message="provider response has invalid JSON shape",
+            )
 
         if "tool_calls" in message or "function_call" in message:
-            raise RuntimeError("provider response has invalid JSON shape")
+            raise ProviderError(
+                error_type="provider_invalid_response",
+                retryable=False,
+                safe_message="provider response has invalid JSON shape",
+            )
 
         content = message.get("content")
         if not isinstance(content, str):
-            raise RuntimeError("provider response has invalid JSON shape")
+            raise ProviderError(
+                error_type="provider_invalid_response",
+                retryable=False,
+                safe_message="provider response has invalid JSON shape",
+            )
 
     return response
 
@@ -399,16 +428,20 @@ def _execute_approved_context(
         execution_security["execution_attempt_id"] = approval.execution_attempt_id
         execution_security["idempotency_key"] = _approval_execution_idempotency_key(approval)
     adapter = resolve_provider_adapter(route)
-    response = _validate_chat_completion_response(
-        adapter.complete(
-            request_id=approval.request_id,
-            model=route.model,
-            messages=deepcopy(messages),
-            effective_prompt=effective_prompt,
-            gateway_security=execution_security,
-            provider_options=deepcopy(provider_options),
-        )
+    raw_response = adapter.complete(
+        request_id=approval.request_id,
+        model=route.model,
+        messages=deepcopy(messages),
+        effective_prompt=effective_prompt,
+        gateway_security=execution_security,
+        provider_options=deepcopy(provider_options),
     )
+    if approval.execution_attempt_id:
+        service.approval_queue.assert_execution_attempt(
+            approval.approval_id,
+            expected_execution_attempt_id=approval.execution_attempt_id,
+        )
+    response = _validate_chat_completion_response(raw_response)
     response = _guard_chat_completion_response(
         response=response,
         request_id=approval.request_id,
@@ -454,6 +487,7 @@ def _provider_error_summary(error: RuntimeError) -> dict[str, object]:
             "provider_status_code": error.status_code,
             "retryable": error.retryable,
             "provider_error_body_sha256": error.body_sha256,
+            "provider_error_body_truncated": error.body_truncated,
         }
     message = str(error).lower()
     match = _PROVIDER_STATUS_RE.search(str(error))
@@ -466,11 +500,13 @@ def _provider_error_summary(error: RuntimeError) -> dict[str, object]:
         error_type = "provider_http_error"
     else:
         error_type = "provider_runtime_error"
+    retryable = False if error_type == "provider_invalid_response" else retryable_for_status(status_code)
     payload: dict[str, object] = {
         "error_type": error_type,
         "provider_status_code": status_code,
-        "retryable": retryable_for_status(status_code),
+        "retryable": retryable,
         "provider_error_body_sha256": None,
+        "provider_error_body_truncated": False,
     }
     return payload
 
@@ -511,6 +547,8 @@ def _append_approval_stale_recovered_event(
     approval: ApprovalRequest,
     reason: str,
     service: GatewayService,
+    recovered_by: str,
+    recovered_by_role: str,
 ) -> None:
     route = _route_payload_from_approval_context(approval)
     service.evidence_store.append(
@@ -539,6 +577,9 @@ def _append_approval_stale_recovered_event(
                 else None,
                 "reason": reason,
                 "retryable": True,
+                "recovered_by": recovered_by,
+                "recovered_by_role": recovered_by_role,
+                "auth_method": "admin_bearer_token",
             },
         )
     )
@@ -952,7 +993,7 @@ def _chain_verification_report(evidence_store: object) -> tuple[bool | None, dic
 
 
 if FastAPI is not None:
-    app = FastAPI(title="K-AI Security Gateway", version="0.1.5")
+    app = FastAPI(title="K-AI Security Gateway", version="0.1.6")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     @app.get("/")
@@ -1045,14 +1086,39 @@ if FastAPI is not None:
         authorization: str | None = Header(default=None),
     ) -> dict[str, object]:
         try:
-            _require_admin(authorization=authorization)
+            admin_id, admin_role = _require_admin(authorization=authorization)
             timeout_seconds = float(
                 payload.get("timeout_seconds", _DEFAULT_STALE_EXECUTION_TIMEOUT_SECONDS)
             )
+            force = _coerce_bool(payload.get("force", False))
+            dry_run = _coerce_bool(payload.get("dry_run", False))
+            limit = int(payload.get("limit", _MAX_STALE_EXECUTION_RECOVERIES))
+            if limit <= 0 or limit > _MAX_STALE_EXECUTION_RECOVERIES:
+                raise ValueError(f"limit must be between 1 and {_MAX_STALE_EXECUTION_RECOVERIES}")
+            if timeout_seconds < _MIN_STALE_EXECUTION_TIMEOUT_SECONDS:
+                raise ValueError(
+                    f"timeout_seconds must be at least {_MIN_STALE_EXECUTION_TIMEOUT_SECONDS:g}"
+                )
+            if timeout_seconds < _DEFAULT_STALE_EXECUTION_TIMEOUT_SECONDS and not force:
+                raise ValueError(
+                    "force=true is required when timeout_seconds is below the default"
+                )
             reason = str(payload.get("reason", "execution_timeout")).strip() or "execution_timeout"
-            recovered = gateway.approval_queue.recover_stale_executions(
+            if reason not in _STALE_EXECUTION_RECOVERY_REASONS:
+                allowed = ", ".join(sorted(_STALE_EXECUTION_RECOVERY_REASONS))
+                raise ValueError(f"reason must be one of: {allowed}")
+            matched = gateway.approval_queue.list_stale_executions(
                 timeout_seconds=timeout_seconds,
-                reason=reason,
+                limit=limit,
+            )
+            recovered = (
+                []
+                if dry_run
+                else gateway.approval_queue.recover_stale_executions(
+                    timeout_seconds=timeout_seconds,
+                    reason=reason,
+                    limit=limit,
+                )
             )
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -1063,10 +1129,19 @@ if FastAPI is not None:
                 approval=approval,
                 reason=reason,
                 service=gateway,
+                recovered_by=admin_id,
+                recovered_by_role=admin_role,
             )
         return {
+            "dry_run": dry_run,
+            "matched_count": len(matched),
             "recovered_count": len(recovered),
+            "skipped_count": len(matched) if dry_run else max(len(matched) - len(recovered), 0),
+            "limit": limit,
             "approvals": [_approval_payload(approval) for approval in recovered],
+            "matched_approvals": [_approval_payload(approval) for approval in matched]
+            if dry_run
+            else [],
         }
 
     @app.post("/v1/approvals/{approval_id}/resolve")
@@ -1095,6 +1170,7 @@ if FastAPI is not None:
             if approved:
                 approval = gateway.approval_queue.finish_execution_success(
                     approval_id,
+                    expected_execution_attempt_id=executing_approval.execution_attempt_id or "",
                     resolved_by=approver_id,
                     comment=str(payload.get("comment", "")),
                 )
@@ -1113,10 +1189,17 @@ if FastAPI is not None:
         except RuntimeError as exc:
             if executing_approval is not None:
                 error_type = str(_provider_error_summary(exc)["error_type"])
-                failed_approval = gateway.approval_queue.fail_execution(
-                    approval_id,
-                    error_type=error_type,
-                )
+                try:
+                    failed_approval = gateway.approval_queue.fail_execution(
+                        approval_id,
+                        expected_execution_attempt_id=executing_approval.execution_attempt_id or "",
+                        error_type=error_type,
+                    )
+                except ValueError as state_exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="approval execution attempt changed",
+                    ) from state_exc
                 _append_approval_execution_failed_event(
                     approval=failed_approval,
                     error=exc,
