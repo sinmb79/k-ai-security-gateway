@@ -30,6 +30,10 @@
   safe request context has executed successfully.
 - Approval success/failure transitions must match the current
   `execution_attempt_id`; stale callbacks must not mutate newer attempts.
+- Post-provider execution attempt mismatches must emit audit evidence and return
+  a structured conflict response instead of silently consuming or changing approval state.
+- Stored approval context validation errors must be non-retryable gateway state
+  errors and must not call an upstream provider.
 - Provider raw error bodies must not be copied into API responses, exception
   messages, or evidence package timelines.
 - Provider error body hashing must use a bounded read cap and record truncation

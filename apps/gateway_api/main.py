@@ -409,19 +409,22 @@ def _execute_approved_context(
     if context.get("type") != "chat_completion":
         return None
 
-    route = _route_from_payload(context.get("route"))
+    try:
+        route = _route_from_payload(context.get("route"))
+    except RuntimeError as exc:
+        raise _stored_approval_context_error("stored approval route is invalid") from exc
     messages = context.get("messages")
     provider_options = context.get("provider_options")
     gateway_security = context.get("gateway_security")
     effective_prompt = context.get("effective_prompt")
     if not isinstance(messages, list):
-        raise RuntimeError("stored approval messages are invalid")
+        raise _stored_approval_context_error("stored approval messages are invalid")
     if not isinstance(provider_options, dict):
-        raise RuntimeError("stored approval provider options are invalid")
+        raise _stored_approval_context_error("stored approval provider options are invalid")
     if not isinstance(gateway_security, dict):
-        raise RuntimeError("stored approval gateway metadata is invalid")
+        raise _stored_approval_context_error("stored approval gateway metadata is invalid")
     if not isinstance(effective_prompt, str):
-        raise RuntimeError("stored approval prompt is invalid")
+        raise _stored_approval_context_error("stored approval prompt is invalid")
 
     execution_security = deepcopy(gateway_security)
     if approval.execution_attempt_id:
@@ -451,6 +454,15 @@ def _execute_approved_context(
 
     response["gateway_security"] = execution_security
     return response
+
+
+def _stored_approval_context_error(message: str = "stored approval context is invalid") -> ProviderError:
+    _ = message
+    return ProviderError(
+        error_type="stored_approval_context_error",
+        retryable=False,
+        safe_message="stored approval context is invalid",
+    )
 
 
 def _approval_execution_idempotency_key(approval: ApprovalRequest) -> str:
@@ -582,6 +594,81 @@ def _append_approval_stale_recovered_event(
                 "auth_method": "admin_bearer_token",
             },
         )
+    )
+
+
+def _append_approval_attempt_conflict_event(
+    *,
+    approval: ApprovalRequest,
+    expected_execution_attempt_id: str,
+    current_approval: ApprovalRequest | None,
+    service: GatewayService,
+) -> None:
+    route = _route_payload_from_approval_context(approval)
+    current_status = current_approval.status if current_approval is not None else "missing"
+    current_attempt_id = (
+        current_approval.execution_attempt_id if current_approval is not None else None
+    )
+    service.evidence_store.append(
+        AuditEvent(
+            event_type="approval_execution_attempt_conflict",
+            request_id=approval.request_id,
+            timestamp=datetime.now(UTC),
+            payload={
+                "approval_id": approval.approval_id,
+                "route": route,
+                "status": "conflict",
+                "provider_name": route.get("provider") if isinstance(route, dict) else None,
+                "expected_execution_attempt_id": expected_execution_attempt_id,
+                "current_execution_attempt_id": current_attempt_id,
+                "current_status": current_status,
+                "attempt_count": current_approval.attempt_count
+                if current_approval is not None
+                else approval.attempt_count,
+                "reason": "approval execution attempt changed",
+                "retryable": False,
+            },
+        )
+    )
+
+
+def _approval_attempt_conflict_detail(
+    *,
+    approval: ApprovalRequest,
+    expected_execution_attempt_id: str,
+    current_approval: ApprovalRequest | None,
+) -> dict[str, object]:
+    return {
+        "error": "approval execution attempt changed",
+        "approval_id": approval.approval_id,
+        "expected_execution_attempt_id": expected_execution_attempt_id,
+        "current_execution_attempt_id": current_approval.execution_attempt_id
+        if current_approval is not None
+        else None,
+        "current_status": current_approval.status if current_approval is not None else "missing",
+    }
+
+
+def _approval_attempt_conflict_exception(
+    *,
+    approval: ApprovalRequest,
+    expected_execution_attempt_id: str,
+    service: GatewayService,
+):
+    current_approval = service.approval_queue.get(approval.approval_id)
+    _append_approval_attempt_conflict_event(
+        approval=approval,
+        expected_execution_attempt_id=expected_execution_attempt_id,
+        current_approval=current_approval,
+        service=service,
+    )
+    return HTTPException(
+        status_code=409,
+        detail=_approval_attempt_conflict_detail(
+            approval=approval,
+            expected_execution_attempt_id=expected_execution_attempt_id,
+            current_approval=current_approval,
+        ),
     )
 
 
@@ -993,7 +1080,7 @@ def _chain_verification_report(evidence_store: object) -> tuple[bool | None, dic
 
 
 if FastAPI is not None:
-    app = FastAPI(title="K-AI Security Gateway", version="0.1.6")
+    app = FastAPI(title="K-AI Security Gateway", version="0.1.7")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     @app.get("/")
@@ -1152,6 +1239,7 @@ if FastAPI is not None:
     ) -> dict[str, object]:
         completion: dict[str, object] | None = None
         executing_approval: ApprovalRequest | None = None
+        approved = False
         try:
             _require_admin(authorization=authorization)
             approved = _coerce_bool(payload.get("approved", False))
@@ -1185,6 +1273,12 @@ if FastAPI is not None:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
+            if approved and executing_approval is not None:
+                raise _approval_attempt_conflict_exception(
+                    approval=executing_approval,
+                    expected_execution_attempt_id=executing_approval.execution_attempt_id or "",
+                    service=gateway,
+                ) from exc
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except RuntimeError as exc:
             if executing_approval is not None:
@@ -1196,9 +1290,10 @@ if FastAPI is not None:
                         error_type=error_type,
                     )
                 except ValueError as state_exc:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="approval execution attempt changed",
+                    raise _approval_attempt_conflict_exception(
+                        approval=executing_approval,
+                        expected_execution_attempt_id=executing_approval.execution_attempt_id or "",
+                        service=gateway,
                     ) from state_exc
                 _append_approval_execution_failed_event(
                     approval=failed_approval,

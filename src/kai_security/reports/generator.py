@@ -98,6 +98,18 @@ _SAFE_TIMELINE_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
         "recovered_by_role",
         "auth_method",
     ),
+    "approval_execution_attempt_conflict": (
+        "approval_id",
+        "route",
+        "status",
+        "provider_name",
+        "expected_execution_attempt_id",
+        "current_execution_attempt_id",
+        "current_status",
+        "attempt_count",
+        "reason",
+        "retryable",
+    ),
     "request_finalized": ("action", "effective_prompt_changed"),
 }
 

@@ -277,10 +277,14 @@ audit event search, and CSV/JSONL export behavior.
   key so duplicate approval attempts do not create duplicate model completions.
   Success and failure transitions are attempt-aware, so a stale provider callback
   cannot approve or fail a newer execution attempt.
+- Post-provider attempt mismatches return a structured `409` response and append
+  `approval_execution_attempt_conflict` without mutating the newer approval state.
 - If approved provider execution fails, the approval returns to `pending` and can
   be retried. Failure evidence records sanitized error type, provider status code,
   attempt count, capped provider error body hash, body truncation status, and
   status-aware retryability metadata.
+- Stored approval context validation failures are recorded as non-retryable
+  `stored_approval_context_error` gateway state errors and do not call the provider.
 - Provider raw error bodies are not placed in exception messages, API responses, or
   evidence package timelines. HTTP error bodies are reduced to SHA-256 hashes for
   correlation when available.

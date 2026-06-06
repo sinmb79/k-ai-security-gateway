@@ -11,6 +11,7 @@
 - `approval_executed` (optional when an approved chat completion is forwarded)
 - `approval_execution_failed` (optional when approved forwarding fails)
 - `approval_execution_stale_recovered` (optional when an old `executing` item is returned to `pending`)
+- `approval_execution_attempt_conflict` (optional when an old execution attempt conflicts with the current approval state)
 - `response_analyzed` (optional when a provider response is returned)
 - `request_finalized`
 
@@ -106,7 +107,7 @@ an approved request is being forwarded.
 - `status` (`failed`)
 - `provider_name` (string, optional)
 - `error_type` (`provider_timeout`, `provider_invalid_response`, `provider_http_error`,
-  or `provider_runtime_error`)
+  `provider_runtime_error`, or `stored_approval_context_error`)
 - `provider_status_code` (number or null)
 - `provider_error_body_sha256` (string or null)
 - `provider_error_body_truncated` (boolean)
@@ -126,6 +127,9 @@ include a capped `provider_error_body_sha256` and `provider_error_body_truncated
 for correlation. Retryability is status-aware: network timeouts, `408`, `409`, `425`,
 `429`, and `5xx` are retryable; ordinary `4xx` provider errors such as `400`, `401`,
 `403`, `404`, and `422` are not. Invalid provider response shape is non-retryable.
+Stored approval context validation failures are recorded as
+`stored_approval_context_error`, are non-retryable, and are treated as gateway
+state/data errors rather than provider transport failures.
 
 ### `approval_execution_stale_recovered`
 
@@ -153,6 +157,24 @@ transactional persistent approval backend.
 `POST /v1/approvals/recover-stale` supports `dry_run=true` for preview. Timeout values
 below the default require `force=true`, and recovery reasons are restricted to
 `execution_timeout`, `process_restart`, or `operator_recovery`.
+
+### `approval_execution_attempt_conflict`
+
+- `approval_id` (string)
+- `route` (object or null)
+- `status` (`conflict`)
+- `provider_name` (string, optional)
+- `expected_execution_attempt_id` (string)
+- `current_execution_attempt_id` (string or null)
+- `current_status` (string)
+- `attempt_count` (number)
+- `reason` (string)
+- `retryable` (boolean, always `false`)
+
+This event is emitted when an approved execution path tries to finalize or fail an
+older `execution_attempt_id` after the approval has moved to a newer attempt or a
+terminal state. The API returns `409` with structured attempt details and does not
+mutate the newer approval state.
 
 ### `response_analyzed`
 
