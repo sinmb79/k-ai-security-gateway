@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -29,10 +30,13 @@ class OpenAICompatibleHTTPAdapter:
         messages: list[dict[str, object]],
         effective_prompt: str,
         gateway_security: dict[str, object],
+        provider_options: dict[str, object] | None = None,
     ) -> dict[str, object]:
         _ = request_id
         _ = effective_prompt
         payload = {"model": model, "messages": messages}
+        if provider_options:
+            payload.update(provider_options)
         return _post_chat_completion(
             endpoint=self.endpoint,
             payload=payload,
@@ -64,8 +68,11 @@ def _post_chat_completion(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    # Keep gateway metadata available for upstream providers that understand it.
-    headers["X-KAI-Security"] = json.dumps(gateway_security, ensure_ascii=False)
+    if _send_upstream_metadata_enabled():
+        headers["X-KAI-Security"] = json.dumps(
+            _upstream_gateway_security(gateway_security),
+            ensure_ascii=False,
+        )
 
     request = Request(
         url=url,
@@ -90,3 +97,16 @@ def _post_chat_completion(
     if not isinstance(body, dict):
         raise RuntimeError("provider response has invalid JSON shape")
     return body
+
+
+def _send_upstream_metadata_enabled() -> bool:
+    raw = os.environ.get("KAI_SECURITY_SEND_UPSTREAM_METADATA", "")
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _upstream_gateway_security(gateway_security: dict[str, object]) -> dict[str, object]:
+    return {
+        key: gateway_security[key]
+        for key in ("request_id", "action", "policy_id")
+        if key in gateway_security
+    }

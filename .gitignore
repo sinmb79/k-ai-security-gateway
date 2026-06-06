@@ -10,6 +10,7 @@ env/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
 *.log
 .server.err
 .env

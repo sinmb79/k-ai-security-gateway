@@ -1,0 +1,40 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Python package
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[api]"
+
+      - name: Run unit tests
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests
+
+      - name: Compile Python modules
+        run: python -m compileall src apps
+
+      - name: Check admin dashboard JavaScript
+        run: node --check apps/gateway_api/static/admin.js
+
+      - name: Validate Docker Compose config
+        run: docker compose --env-file .env.example config --quiet

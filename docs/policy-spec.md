@@ -45,13 +45,14 @@ back to defaults.
 
 ## Default MVP Rules
 
-1. Restricted data to external model: require approval.
-2. Korean PII to external model: mask.
-3. Prompt injection with high risk: block.
-4. Confidential data to external model: route private.
-5. Data exfiltration indicators to external model: require approval.
-6. High-risk document/RAG hidden instructions to external model: require approval.
-6. No findings and low risk: allow.
+1. Prompt injection with high risk: block.
+2. High risk score without Korean PII: block.
+3. Restricted data to external model: require approval.
+4. Data exfiltration indicators to external model: require approval.
+5. High-risk document/RAG hidden instructions to external model: require approval.
+6. Confidential data to external model: route private.
+7. Korean PII to external model: mask.
+8. No findings and low risk: allow.
 
 ## API
 

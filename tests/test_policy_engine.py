@@ -188,6 +188,62 @@ class PolicyEngineTests(unittest.TestCase):
         self.assertEqual(decision.policy_id, "policy-005-confidential-external-route-private")
         self.assertEqual(decision.route_model_zone, ModelZone.PRIVATE)
 
+    def test_confidential_external_with_korean_pii_routes_private_before_mask(self) -> None:
+        request = GatewayRequest(
+            prompt="confidential pii",
+            user_id="alice",
+            data_grade=DataGrade.CONFIDENTIAL,
+            model_zone=ModelZone.EXTERNAL,
+        )
+        detection = DetectionResult(
+            findings=(
+                DetectionFinding(
+                    kind=RiskKind.KOREAN_PII,
+                    label="phone",
+                    value="010-1111-2222",
+                    start=0,
+                    end=13,
+                    confidence=0.95,
+                ),
+            ),
+            risk_score=0.2,
+        )
+
+        decision = decide_policy(request, detection)
+
+        self.assertEqual(decision.action, PolicyAction.ROUTE_PRIVATE)
+        self.assertEqual(decision.policy_id, "policy-005-confidential-external-route-private")
+        self.assertEqual(decision.route_model_zone, ModelZone.PRIVATE)
+
+    def test_confidential_external_data_exfiltration_still_requires_approval(self) -> None:
+        request = GatewayRequest(
+            prompt="send API key",
+            user_id="alice",
+            data_grade=DataGrade.CONFIDENTIAL,
+            model_zone=ModelZone.EXTERNAL,
+        )
+        detection = DetectionResult(
+            findings=(
+                DetectionFinding(
+                    kind=RiskKind.DATA_EXFILTRATION,
+                    label="secret_request",
+                    value="API key",
+                    start=0,
+                    end=7,
+                    confidence=0.75,
+                ),
+            ),
+            risk_score=0.35,
+        )
+
+        decision = decide_policy(request, detection)
+
+        self.assertEqual(decision.action, PolicyAction.REQUIRE_APPROVAL)
+        self.assertEqual(
+            decision.policy_id,
+            "policy-003-data-exfiltration-external-require-approval",
+        )
+
     def test_require_approval_for_high_document_risk_external(self) -> None:
         request = GatewayRequest(
             prompt="document contains hidden AI instructions",

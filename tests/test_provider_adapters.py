@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import patch
 
@@ -75,7 +76,12 @@ class ProviderAdapterTests(unittest.TestCase):
                 os.environ[endpoint_var] = old_value
 
     @patch("kai_security.providers.openai_compatible.urlopen")
-    def test_openai_adapter_posts_payload_without_network_call(self, mock_urlopen) -> None:
+    def test_openai_adapter_posts_payload_without_metadata_by_default(self, mock_urlopen) -> None:
+        import os
+
+        old_value = os.environ.get("KAI_SECURITY_SEND_UPSTREAM_METADATA")
+        os.environ.pop("KAI_SECURITY_SEND_UPSTREAM_METADATA", None)
+
         class _FakeHTTPResponse:
             def __enter__(self):
                 return self
@@ -89,21 +95,91 @@ class ProviderAdapterTests(unittest.TestCase):
                     b'"id":"mock-id","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"provider response"}}]}'
                 )
 
-        mock_urlopen.return_value = _FakeHTTPResponse()
-        adapter = OpenAICompatibleHTTPAdapter(endpoint="https://provider.local", api_key="secret")
-        response = adapter.complete(
-            request_id="req-1",
-            model="mock-model",
-            messages=[{"role": "user", "content": "hello"}],
-            effective_prompt="MASKED",
-            gateway_security={"action": "allow"},
-        )
+        try:
+            mock_urlopen.return_value = _FakeHTTPResponse()
+            adapter = OpenAICompatibleHTTPAdapter(endpoint="https://provider.local", api_key="secret")
+            response = adapter.complete(
+                request_id="req-1",
+                model="mock-model",
+                messages=[{"role": "user", "content": "hello"}],
+                effective_prompt="MASKED",
+                gateway_security={"action": "allow"},
+                provider_options={
+                    "temperature": 0.2,
+                    "max_tokens": 32,
+                    "top_p": 0.9,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+        finally:
+            if old_value is None:
+                os.environ.pop("KAI_SECURITY_SEND_UPSTREAM_METADATA", None)
+            else:
+                os.environ["KAI_SECURITY_SEND_UPSTREAM_METADATA"] = old_value
 
         self.assertEqual(response["id"], "mock-id")
         request = mock_urlopen.call_args.args[0]
         self.assertTrue(request.full_url.endswith("/v1/chat/completions"))
         self.assertIsNotNone(request.data)
-        self.assertIn("x-kai-security", {key.lower() for key in request.headers})
+        self.assertNotIn("x-kai-security", {key.lower() for key in request.headers})
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(body["temperature"], 0.2)
+        self.assertEqual(body["max_tokens"], 32)
+        self.assertEqual(body["top_p"], 0.9)
+        self.assertEqual(body["response_format"], {"type": "json_object"})
+
+    @patch("kai_security.providers.openai_compatible.urlopen")
+    def test_openai_adapter_metadata_header_is_opt_in_and_minimal(self, mock_urlopen) -> None:
+        import os
+
+        old_value = os.environ.get("KAI_SECURITY_SEND_UPSTREAM_METADATA")
+        os.environ["KAI_SECURITY_SEND_UPSTREAM_METADATA"] = "true"
+
+        class _FakeHTTPResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return (
+                    b"{"
+                    b'"id":"mock-id","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"provider response"}}]}'
+                )
+
+        try:
+            mock_urlopen.return_value = _FakeHTTPResponse()
+            adapter = OpenAICompatibleHTTPAdapter(endpoint="https://provider.local", api_key="secret")
+            adapter.complete(
+                request_id="req-1",
+                model="mock-model",
+                messages=[{"role": "user", "content": "hello"}],
+                effective_prompt="MASKED",
+                gateway_security={
+                    "request_id": "req-1",
+                    "action": "allow",
+                    "policy_id": "policy-1",
+                    "approval_id": "approval-1",
+                    "route": {"provider": "external-openai-compatible"},
+                },
+            )
+        finally:
+            if old_value is None:
+                os.environ.pop("KAI_SECURITY_SEND_UPSTREAM_METADATA", None)
+            else:
+                os.environ["KAI_SECURITY_SEND_UPSTREAM_METADATA"] = old_value
+
+        request = mock_urlopen.call_args.args[0]
+        header_value = request.headers["X-kai-security"]
+        self.assertEqual(
+            json.loads(header_value),
+            {
+                "request_id": "req-1",
+                "action": "allow",
+                "policy_id": "policy-1",
+            },
+        )
 
     @patch("kai_security.providers.openai_compatible.urlopen")
     def test_openai_adapter_converts_malformed_json_to_runtime_error(self, mock_urlopen) -> None:

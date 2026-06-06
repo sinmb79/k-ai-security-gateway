@@ -29,7 +29,7 @@ K-AI Security Gateway starts from that position:
 
 ## Core Features
 
-- OpenAI-compatible `/v1/chat/completions` gateway
+- OpenAI-compatible subset `/v1/chat/completions` gateway
 - Provider routing for external, private, domestic SaaS, and on-prem model zones
 - Korean PII detection and masking
 - Prompt-injection, data-exfiltration, and document/RAG risk detection
@@ -49,7 +49,7 @@ K-AI Security Gateway starts from that position:
 
 ```mermaid
 flowchart LR
-    User["User or AI app"] --> Gateway["OpenAI-compatible Gateway"]
+    User["User or AI app"] --> Gateway["OpenAI-compatible subset Gateway"]
     Gateway --> Detectors["PII, prompt risk, document risk detectors"]
     Detectors --> Policy["Policy engine"]
     Policy --> Decision{"Decision"}
@@ -78,7 +78,7 @@ sequenceDiagram
     participant M as Model Provider
     participant A as Audit Store
 
-    App->>GW: OpenAI-compatible chat completion request
+    App->>GW: OpenAI-compatible subset chat completion request
     GW->>D: Detect Korean PII and AI risk signals
     D->>P: Findings and risk score
     P-->>GW: allow, mask, route_private, require_approval, or block
@@ -91,7 +91,7 @@ sequenceDiagram
         M-->>GW: Model response
         GW->>GW: Guard response for PII and secrets
         GW->>A: Append evidence event
-        GW-->>App: OpenAI-compatible response
+        GW-->>App: OpenAI-compatible subset response
     end
 ```
 
@@ -124,9 +124,10 @@ python -m pip install --upgrade pip
 python -m pip install fastapi uvicorn pytest
 ```
 
-Set local admin and approver tokens:
+Set local client, admin, and approver tokens:
 
 ```powershell
+$env:KAI_SECURITY_CLIENT_TOKENS = "client-token=client-1:security"
 $env:KAI_SECURITY_APPROVER_TOKENS = "approver-token=manager-1:security_manager"
 $env:KAI_SECURITY_ADMIN_TOKENS = "admin-token=manager-1:security_manager"
 $env:KAI_SECURITY_DB_PATH = ".\data\evidence.sqlite3"
@@ -165,7 +166,11 @@ Docker Compose stores audit evidence in the `kai-security-data` volume.
 
 ## Provider Configuration
 
-The gateway uses a local echo provider unless an endpoint is configured.
+The gateway uses a local echo provider unless an endpoint is configured. The current
+OpenAI-compatible surface is a safety-first subset: requests are rebuilt from
+user-visible messages, `temperature`, `max_tokens`, `top_p`, and `response_format`
+are forwarded when present, and streaming/tool calling passthrough is not supported
+in this MVP.
 
 ```powershell
 $env:KAI_SECURITY_EXTERNAL_OPENAI_COMPATIBLE_ENDPOINT = "https://api.openai.com"
@@ -184,6 +189,13 @@ Supported provider names:
 - `on-prem-llm`
 
 If endpoint variables are absent, providers keep using the mock/echo behavior.
+
+Gateway metadata is not sent to upstream providers by default. To opt in to a minimal
+`X-KAI-Security` header containing only `request_id`, `action`, and `policy_id`, set:
+
+```powershell
+$env:KAI_SECURITY_SEND_UPSTREAM_METADATA = "true"
+```
 
 ## Policy Loading
 
@@ -221,7 +233,10 @@ docker compose --env-file .env.example config --quiet
 With a server running:
 
 ```powershell
-./scripts/smoke-test.ps1 -BaseUrl "http://127.0.0.1:8765" -AdminToken "admin-token-1"
+./scripts/smoke-test.ps1 `
+  -BaseUrl "http://127.0.0.1:8765" `
+  -AdminToken "admin-token-1" `
+  -ClientToken "client-token-1"
 ```
 
 The smoke script checks masking, policy simulation, evidence package generation,
@@ -231,6 +246,8 @@ audit event search, and CSV/JSONL export behavior.
 
 - Do not commit real provider keys, admin tokens, approver tokens, audit databases,
   raw prompts, or customer data.
+- Client access to `/v1/chat/completions` and `/v1/security/evaluate` requires
+  `KAI_SECURITY_CLIENT_TOKENS`.
 - `.env`, `.env.*`, `data/`, SQLite files, logs, generated artifacts, and worktrees
   are ignored by default.
 - `.env.example` contains placeholders only.
@@ -243,7 +260,7 @@ See [SECURITY.md](SECURITY.md) for reporting and handling guidance.
 
 ## Known MVP Boundaries
 
-- Streaming chat completion pass-through is not implemented yet.
+- Streaming chat completion and tool-calling pass-through are not implemented yet.
 - Production SSO/RBAC integration is not implemented yet.
 - Very large audit exports need cursor-based pagination.
 - Policy editing/version publishing in the dashboard is not complete.
