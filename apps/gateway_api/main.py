@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
@@ -18,7 +19,7 @@ from copy import deepcopy
 
 from kai_security.approval.queue import (
     APPROVAL_STATUS_APPROVED,
-    APPROVAL_STATUS_PENDING,
+    APPROVAL_STATUS_EXECUTING,
     ApprovalRequest,
 )
 from kai_security.detectors.pii import mask_token_for_label
@@ -72,6 +73,7 @@ _MAX_AUDIT_EVENT_EXPORT_LIMIT = 5000
 _DEFAULT_CHAIN_VERIFY_MAX_EVENTS = 50000
 _APP_DIR = Path(__file__).resolve().parent
 _STATIC_DIR = _APP_DIR / "static"
+_PROVIDER_STATUS_RE = re.compile(r"provider request failed:\s+(?P<status>\d{3})")
 
 
 def build_gateway_request(payload: dict[str, object]) -> GatewayRequest:
@@ -365,12 +367,12 @@ def _execute_approved_context(
     approval: ApprovalRequest,
     service: GatewayService,
     *,
-    allow_pending: bool = False,
+    allow_executing: bool = False,
 ) -> dict[str, object] | None:
     if approval.context is None:
         return None
     if approval.status != APPROVAL_STATUS_APPROVED:
-        if not (allow_pending and approval.status == APPROVAL_STATUS_PENDING):
+        if not (allow_executing and approval.status == APPROVAL_STATUS_EXECUTING):
             return None
     context = approval.context
     if context.get("type") != "chat_completion":
@@ -391,42 +393,34 @@ def _execute_approved_context(
         raise RuntimeError("stored approval prompt is invalid")
 
     execution_security = deepcopy(gateway_security)
-    route_payload = _route_payload(route)
-    try:
-        adapter = resolve_provider_adapter(route)
-        response = _validate_chat_completion_response(
-            adapter.complete(
-                request_id=approval.request_id,
-                model=route.model,
-                messages=deepcopy(messages),
-                effective_prompt=effective_prompt,
-                gateway_security=execution_security,
-                provider_options=deepcopy(provider_options),
-            )
-        )
-        response = _guard_chat_completion_response(
-            response=response,
+    if approval.execution_attempt_id:
+        execution_security["execution_attempt_id"] = approval.execution_attempt_id
+        execution_security["idempotency_key"] = _approval_execution_idempotency_key(approval)
+    adapter = resolve_provider_adapter(route)
+    response = _validate_chat_completion_response(
+        adapter.complete(
             request_id=approval.request_id,
-            service=service,
+            model=route.model,
+            messages=deepcopy(messages),
+            effective_prompt=effective_prompt,
             gateway_security=execution_security,
+            provider_options=deepcopy(provider_options),
         )
-    except RuntimeError:
-        service.evidence_store.append(
-            AuditEvent(
-                event_type="approval_execution_failed",
-                request_id=approval.request_id,
-                timestamp=datetime.now(UTC),
-                payload={
-                    "approval_id": approval.approval_id,
-                    "route": route_payload,
-                    "status": "failed",
-                },
-            )
-        )
-        raise
+    )
+    response = _guard_chat_completion_response(
+        response=response,
+        request_id=approval.request_id,
+        service=service,
+        gateway_security=execution_security,
+    )
 
     response["gateway_security"] = execution_security
     return response
+
+
+def _approval_execution_idempotency_key(approval: ApprovalRequest) -> str:
+    attempt_id = approval.execution_attempt_id or "manual"
+    return f"kai-approval-{approval.approval_id}-{attempt_id}"
 
 
 def _approval_completion_delivery(
@@ -439,6 +433,67 @@ def _approval_completion_delivery(
         "request_id": approval.request_id,
         "original_client_callback": False,
     }
+
+
+def _route_payload_from_approval_context(approval: ApprovalRequest) -> dict[str, object] | None:
+    context = approval.context
+    if not isinstance(context, dict):
+        return None
+    try:
+        return _route_payload(_route_from_payload(context.get("route")))
+    except RuntimeError:
+        return None
+
+
+def _provider_error_summary(error: RuntimeError) -> dict[str, object]:
+    message = str(error).lower()
+    match = _PROVIDER_STATUS_RE.search(str(error))
+    status_code = int(match.group("status")) if match else None
+    if "timeout" in message:
+        error_type = "provider_timeout"
+    elif "invalid json shape" in message:
+        error_type = "provider_invalid_response"
+    elif status_code is not None:
+        error_type = "provider_http_error"
+    else:
+        error_type = "provider_runtime_error"
+    payload: dict[str, object] = {
+        "error_type": error_type,
+        "provider_status_code": status_code,
+        "retryable": True,
+    }
+    return payload
+
+
+def _append_approval_execution_failed_event(
+    *,
+    approval: ApprovalRequest,
+    error: RuntimeError,
+    service: GatewayService,
+) -> None:
+    error_summary = _provider_error_summary(error)
+    route = _route_payload_from_approval_context(approval)
+    payload = {
+        "approval_id": approval.approval_id,
+        "route": route,
+        "status": "failed",
+        "provider_name": route.get("provider") if isinstance(route, dict) else None,
+        "attempt_count": approval.attempt_count,
+        "execution_attempt_id": approval.execution_attempt_id,
+        "first_failed_at": approval.first_failed_at.isoformat()
+        if approval.first_failed_at
+        else None,
+        "last_failed_at": approval.last_failed_at.isoformat() if approval.last_failed_at else None,
+        **error_summary,
+    }
+    service.evidence_store.append(
+        AuditEvent(
+            event_type="approval_execution_failed",
+            request_id=approval.request_id,
+            timestamp=datetime.now(UTC),
+            payload=payload,
+        )
+    )
 
 
 def _append_approval_executed_event(
@@ -462,6 +517,8 @@ def _append_approval_executed_event(
                 "approval_id": approval.approval_id,
                 "route": route,
                 "status": "executed",
+                "attempt_count": approval.attempt_count,
+                "execution_attempt_id": approval.execution_attempt_id,
                 "response_guard": response_guard,
                 "delivery": _approval_completion_delivery(approval, completion),
             },
@@ -647,6 +704,14 @@ def _approval_payload(approval: ApprovalRequest) -> dict[str, object]:
         "resolved_by": approval.resolved_by,
         "resolved_at": approval.resolved_at.isoformat() if approval.resolved_at else None,
         "resolution_comment": approval.resolution_comment,
+        "execution_attempt_id": approval.execution_attempt_id,
+        "attempt_count": approval.attempt_count,
+        "execution_started_at": approval.execution_started_at.isoformat()
+        if approval.execution_started_at
+        else None,
+        "first_failed_at": approval.first_failed_at.isoformat() if approval.first_failed_at else None,
+        "last_failed_at": approval.last_failed_at.isoformat() if approval.last_failed_at else None,
+        "last_execution_error": approval.last_execution_error,
         "has_execution_context": approval.context is not None,
     }
 
@@ -836,7 +901,7 @@ def _chain_verification_report(evidence_store: object) -> tuple[bool | None, dic
 
 
 if FastAPI is not None:
-    app = FastAPI(title="K-AI Security Gateway", version="0.1.3")
+    app = FastAPI(title="K-AI Security Gateway", version="0.1.4")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     @app.get("/")
@@ -930,20 +995,21 @@ if FastAPI is not None:
         authorization: str | None = Header(default=None),
     ) -> dict[str, object]:
         completion: dict[str, object] | None = None
+        executing_approval: ApprovalRequest | None = None
         try:
             _require_admin(authorization=authorization)
             approved = _coerce_bool(payload.get("approved", False))
             approver_id, approver_role = _require_approver(payload)
             if approved:
-                pending_approval = gateway.approval_queue.get(approval_id)
-                if pending_approval is None:
-                    raise KeyError(f"Approval request not found: {approval_id}")
-                if pending_approval.status != APPROVAL_STATUS_PENDING:
-                    raise ValueError(f"Approval request already resolved: {approval_id}")
+                executing_approval = gateway.approval_queue.begin_execution(
+                    approval_id,
+                    resolved_by=approver_id,
+                    comment=str(payload.get("comment", "")),
+                )
                 completion = _execute_approved_context(
-                    pending_approval,
+                    executing_approval,
                     gateway,
-                    allow_pending=True,
+                    allow_executing=True,
                 )
             approval = gateway.approval_queue.resolve(
                 approval_id=approval_id,
@@ -958,6 +1024,17 @@ if FastAPI is not None:
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except RuntimeError as exc:
+            if executing_approval is not None:
+                error_type = str(_provider_error_summary(exc)["error_type"])
+                failed_approval = gateway.approval_queue.fail_execution(
+                    approval_id,
+                    error_type=error_type,
+                )
+                _append_approval_execution_failed_event(
+                    approval=failed_approval,
+                    error=exc,
+                    service=gateway,
+                )
             raise HTTPException(status_code=502, detail="approved provider request failed") from exc
         gateway.evidence_store.append(
             AuditEvent(

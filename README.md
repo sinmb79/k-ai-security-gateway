@@ -88,6 +88,7 @@ sequenceDiagram
         GW->>A: Append evidence event
         GW-->>App: Approval required response
         Admin->>GW: Resolve approval
+        GW->>Q: Atomically mark approval executing
         GW->>M: Execute stored safe request context
         alt provider success
             M-->>GW: Model response
@@ -97,6 +98,7 @@ sequenceDiagram
             GW-->>Admin: Completion in approval resolve response
         else provider failure
             M-->>GW: Temporary provider failure
+            GW->>Q: Return approval to pending
             GW->>A: Append approval_execution_failed
             GW-->>Admin: 502, approval remains pending for retry
         end
@@ -271,7 +273,13 @@ audit event search, and CSV/JSONL export behavior.
   the page clears them.
 - Approved model responses are returned to the approval resolver and displayed in
   the admin UI. Original client callback delivery is not implemented in the MVP.
-- If approved provider execution fails, the approval stays pending and can be retried.
+- Approved provider execution uses a transient `executing` status and idempotency
+  key so duplicate approval attempts do not create duplicate model completions.
+- If approved provider execution fails, the approval returns to `pending` and can
+  be retried. Failure evidence records sanitized error type, provider status code,
+  attempt count, and retryability metadata.
+- Docker Compose binds the API to `127.0.0.1:8765` by default. Use a reverse proxy,
+  TLS, and explicit network allowlists before exposing it beyond localhost.
 - Evidence reports are designed for review support. They are not legal advice or a
   substitute for a formal audit.
 
@@ -293,13 +301,15 @@ See [SECURITY.md](SECURITY.md) for reporting and handling guidance.
 ## Roadmap
 
 1. Gateway hardening: streaming support, provider retry budgets, production auth,
-   retention controls, and encrypted evidence separation.
+   rate limits, quotas, retention controls, and encrypted evidence separation.
 2. Agent Firewall and Tool Broker: tool allowlists, least privilege, temporary
    permissions, and human approval for high-risk tool calls.
 3. AI SOC Agent: incident timeline, alert explanation, MITRE ATT&CK/ATLAS mapping,
    and response playbook drafts.
 4. AI Compliance Agent: evidence collection and report drafts for Korea AI Act,
    privacy law, ISMS-P, CSAP, N2SF-style controls, and internal AI governance.
+5. Supply-chain hardening: lockfile, pip-audit, image scan, SBOM, and release
+   artifact verification.
 
 ## Documentation
 

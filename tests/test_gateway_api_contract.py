@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event, Thread
 from unittest.mock import Mock, patch
 
 from apps.gateway_api.main import (
@@ -1389,6 +1390,8 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertEqual(called_payload["model"], "gateway-test")
         self.assertEqual(called_payload["provider_options"], {"temperature": 0.1})
         self.assertTrue(called_payload["gateway_security"]["approved_execution"])
+        self.assertIn("execution_attempt_id", called_payload["gateway_security"])
+        self.assertIn("idempotency_key", called_payload["gateway_security"])
         event_types = [
             event.event_type
             for event in service.evidence_store.list_events(
@@ -1470,6 +1473,97 @@ class GatewayApiContractTests(unittest.TestCase):
         self.assertIn("approval_execution_failed", event_types)
         self.assertIn("approval_resolved", event_types)
         self.assertIn("approval_executed", event_types)
+        failed_events = service.evidence_store.list_events(
+            request_id=chat_response.json()["gateway_security"]["request_id"],
+            event_type="approval_execution_failed",
+        )
+        self.assertEqual(len(failed_events), 1)
+        failed_payload = failed_events[0].payload
+        self.assertEqual(failed_payload["error_type"], "provider_runtime_error")
+        self.assertEqual(failed_payload["provider_name"], "external-openai-compatible")
+        self.assertEqual(failed_payload["attempt_count"], 1)
+        self.assertTrue(failed_payload["retryable"])
+        self.assertIn("execution_attempt_id", failed_payload)
+        self.assertNotIn("temporary upstream failure", str(failed_payload))
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_concurrent_approval_execution_calls_provider_once(self) -> None:
+        self._set_env("KAI_SECURITY_ADMIN_TOKENS", "admin-token=manager-1:admin")
+        self._set_env("KAI_SECURITY_APPROVER_TOKENS", "approver-token=approver-1:security_manager")
+        service = GatewayService()
+        client = TestClient(app)
+        adapter = Mock()
+        provider_started = Event()
+        provider_release = Event()
+        first_response = []
+
+        def _complete(**kwargs):
+            provider_started.set()
+            self.assertTrue(provider_release.wait(5))
+            return {
+                "id": "adapter-concurrent-1",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "single provider response"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+
+        adapter.complete.side_effect = _complete
+
+        with (
+            patch("apps.gateway_api.main.gateway", service),
+            patch("apps.gateway_api.main.resolve_provider_adapter", return_value=adapter),
+        ):
+            chat_response = client.post(
+                "/v1/chat/completions",
+                headers=self._client_headers(),
+                json={
+                    "model": "gateway-test",
+                    "data_grade": "restricted",
+                    "model_zone": "external",
+                    "messages": [{"role": "user", "content": "normal business review"}],
+                },
+            )
+            approval_id = chat_response.json()["gateway_security"]["approval_id"]
+
+            def _first_approve() -> None:
+                first_response.append(
+                    client.post(
+                        f"/v1/approvals/{approval_id}/resolve",
+                        headers={"Authorization": "Bearer admin-token"},
+                        json={"approval_token": "approver-token", "approved": True},
+                    )
+                )
+
+            first_thread = Thread(target=_first_approve)
+            first_thread.start()
+            self.assertTrue(provider_started.wait(5))
+            second_response = client.post(
+                f"/v1/approvals/{approval_id}/resolve",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"approval_token": "approver-token", "approved": True},
+            )
+            provider_release.set()
+            first_thread.join(timeout=5)
+
+        self.assertEqual(len(first_response), 1)
+        self.assertEqual(first_response[0].status_code, 200)
+        self.assertEqual(second_response.status_code, 409)
+        self.assertEqual(adapter.complete.call_count, 1)
+        stored = service.approval_queue.get(approval_id)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.status, "approved")
+        event_types = [
+            event.event_type
+            for event in service.evidence_store.list_events(
+                request_id=chat_response.json()["gateway_security"]["request_id"]
+            )
+        ]
+        self.assertEqual(event_types.count("approval_executed"), 1)
 
     @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
     def test_rejected_approval_does_not_execute_stored_context(self) -> None:
