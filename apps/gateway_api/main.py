@@ -20,7 +20,7 @@ from kai_security.approval.queue import ApprovalRequest
 from kai_security.detectors.pii import mask_token_for_label
 from kai_security.evidence.sqlite_store import SQLiteEvidenceStore
 from kai_security.gateway.service import GatewayService
-from kai_security.model_router import choose_route
+from kai_security.model_router import ModelRoute, choose_approved_route, choose_route
 from kai_security.models import AuditEvent, DataGrade, GatewayRequest, ModelZone, PolicyAction, RiskKind
 from kai_security.openai_compat import (
     build_blocked_chat_response,
@@ -90,6 +90,7 @@ def build_gateway_request(payload: dict[str, object]) -> GatewayRequest:
         requested_model=str(payload.get("requested_model", "default")),
         data_grade=_coerce_enum(DataGrade, payload.get("data_grade"), DataGrade.INTERNAL),
         model_zone=_coerce_enum(ModelZone, payload.get("model_zone"), ModelZone.EXTERNAL),
+        metadata=dict(payload.get("metadata") or {}),
     )
 
 
@@ -123,6 +124,29 @@ def evaluate_chat_completion_payload(
     provider_options = _extract_provider_request_options(payload)
 
     if evaluation.decision.action in {PolicyAction.BLOCK, PolicyAction.REQUIRE_APPROVAL}:
+        if evaluation.decision.action == PolicyAction.REQUIRE_APPROVAL and evaluation.approval_id:
+            approved_route = choose_approved_route(
+                requested_model=request.requested_model,
+                model_zone=request.model_zone,
+                reason=f"approval:{evaluation.decision.policy_id}",
+            )
+            service.approval_queue.attach_context(
+                evaluation.approval_id,
+                {
+                    "type": "chat_completion",
+                    "request_id": request.request_id,
+                    "model": approved_route.model,
+                    "route": _route_payload(approved_route),
+                    "messages": safe_messages,
+                    "effective_prompt": evaluation.effective_prompt,
+                    "provider_options": provider_options,
+                    "gateway_security": {
+                        **gateway_security,
+                        "route": _route_payload(approved_route),
+                        "approved_execution": True,
+                    },
+                },
+            )
         response = build_blocked_chat_response(request.request_id, evaluation.decision.reason)
     else:
         if route is None:
@@ -201,6 +225,21 @@ def _route_payload(route) -> dict[str, object] | None:
         "zone": route.zone.value,
         "reason": route.reason,
     }
+
+
+def _route_from_payload(payload: object) -> ModelRoute:
+    if not isinstance(payload, dict):
+        raise RuntimeError("stored approval route is invalid")
+    try:
+        provider = str(payload["provider"])
+        model = str(payload["model"])
+        zone = ModelZone(str(payload["zone"]))
+        reason = str(payload["reason"])
+    except (KeyError, ValueError) as exc:
+        raise RuntimeError("stored approval route is invalid") from exc
+    if not provider or not model or not reason:
+        raise RuntimeError("stored approval route is invalid")
+    return ModelRoute(provider=provider, model=model, zone=zone, reason=reason)
 
 
 def _build_safe_provider_messages(
@@ -316,6 +355,82 @@ def _guard_chat_completion_response(
         )
     )
     return guarded_response
+
+
+def _execute_approved_context(
+    approval: ApprovalRequest,
+    service: GatewayService,
+) -> dict[str, object] | None:
+    if approval.status != "approved" or approval.context is None:
+        return None
+    context = approval.context
+    if context.get("type") != "chat_completion":
+        return None
+
+    route = _route_from_payload(context.get("route"))
+    messages = context.get("messages")
+    provider_options = context.get("provider_options")
+    gateway_security = context.get("gateway_security")
+    effective_prompt = context.get("effective_prompt")
+    if not isinstance(messages, list):
+        raise RuntimeError("stored approval messages are invalid")
+    if not isinstance(provider_options, dict):
+        raise RuntimeError("stored approval provider options are invalid")
+    if not isinstance(gateway_security, dict):
+        raise RuntimeError("stored approval gateway metadata is invalid")
+    if not isinstance(effective_prompt, str):
+        raise RuntimeError("stored approval prompt is invalid")
+
+    execution_security = deepcopy(gateway_security)
+    route_payload = _route_payload(route)
+    try:
+        adapter = resolve_provider_adapter(route)
+        response = _validate_chat_completion_response(
+            adapter.complete(
+                request_id=approval.request_id,
+                model=route.model,
+                messages=deepcopy(messages),
+                effective_prompt=effective_prompt,
+                gateway_security=execution_security,
+                provider_options=deepcopy(provider_options),
+            )
+        )
+        response = _guard_chat_completion_response(
+            response=response,
+            request_id=approval.request_id,
+            service=service,
+            gateway_security=execution_security,
+        )
+    except RuntimeError:
+        service.evidence_store.append(
+            AuditEvent(
+                event_type="approval_execution_failed",
+                request_id=approval.request_id,
+                timestamp=datetime.now(UTC),
+                payload={
+                    "approval_id": approval.approval_id,
+                    "route": route_payload,
+                    "status": "failed",
+                },
+            )
+        )
+        raise
+
+    service.evidence_store.append(
+        AuditEvent(
+            event_type="approval_executed",
+            request_id=approval.request_id,
+            timestamp=datetime.now(UTC),
+            payload={
+                "approval_id": approval.approval_id,
+                "route": route_payload,
+                "status": "executed",
+                "response_guard": execution_security.get("response_guard"),
+            },
+        )
+    )
+    response["gateway_security"] = execution_security
+    return response
 
 
 def _coerce_bool(value: object) -> bool:
@@ -452,8 +567,16 @@ def _require_client(token: str | None = None, authorization: str | None = None) 
 def _with_client_context(payload: dict[str, object], client: tuple[str, str]) -> dict[str, object]:
     client_id, department = client
     enriched = dict(payload)
-    enriched.setdefault("user_id", client_id)
-    enriched.setdefault("department", department)
+    metadata = dict(enriched.get("metadata") or {})
+    if "user_id" in enriched:
+        metadata["client_supplied_user_id"] = str(enriched["user_id"])
+    if "department" in enriched:
+        metadata["client_supplied_department"] = str(enriched["department"])
+    metadata["authenticated_client_id"] = client_id
+    metadata["authenticated_client_department"] = department
+    enriched["user_id"] = client_id
+    enriched["department"] = department
+    enriched["metadata"] = metadata
     return enriched
 
 
@@ -488,6 +611,7 @@ def _approval_payload(approval: ApprovalRequest) -> dict[str, object]:
         "resolved_by": approval.resolved_by,
         "resolved_at": approval.resolved_at.isoformat() if approval.resolved_at else None,
         "resolution_comment": approval.resolution_comment,
+        "has_execution_context": approval.context is not None,
     }
 
 
@@ -676,7 +800,7 @@ def _chain_verification_report(evidence_store: object) -> tuple[bool | None, dic
 
 
 if FastAPI is not None:
-    app = FastAPI(title="K-AI Security Gateway", version="0.1.1")
+    app = FastAPI(title="K-AI Security Gateway", version="0.1.2")
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     @app.get("/")
@@ -793,7 +917,14 @@ if FastAPI is not None:
                 payload={**_approval_payload(approval), "approver_role": approver_role},
             )
         )
-        return _approval_payload(approval)
+        result = _approval_payload(approval)
+        try:
+            completion = _execute_approved_context(approval, gateway)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail="approved provider request failed") from exc
+        if completion is not None:
+            result["completion"] = completion
+        return result
 
     @app.get("/v1/audit/events")
     def list_audit_events(

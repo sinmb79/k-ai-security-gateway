@@ -159,6 +159,36 @@ class GatewayApiContractTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             _require_client(authorization="Bearer admin-token")
 
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_security_evaluate_audit_uses_authenticated_client_identity(self) -> None:
+        service = GatewayService()
+        client = TestClient(app)
+
+        with patch("apps.gateway_api.main.gateway", service):
+            response = client.post(
+                "/v1/security/evaluate",
+                headers=self._client_headers(),
+                json={
+                    "prompt": "safe prompt",
+                    "user_id": "attacker",
+                    "department": "finance",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        events = service.evidence_store.list_events(
+            request_id=response.json()["request_id"],
+            event_type="request_received",
+        )
+        self.assertEqual(len(events), 1)
+        payload = events[0].payload
+        self.assertEqual(payload["user_id"], "client-1")
+        self.assertEqual(payload["department"], "security")
+        self.assertEqual(payload["metadata"]["authenticated_client_id"], "client-1")
+        self.assertEqual(payload["metadata"]["authenticated_client_department"], "security")
+        self.assertEqual(payload["metadata"]["client_supplied_user_id"], "attacker")
+        self.assertEqual(payload["metadata"]["client_supplied_department"], "finance")
+
     def test_extract_bearer_token_rejects_non_bearer_values(self) -> None:
         self.assertEqual(_extract_bearer_token("Bearer admin-token"), "admin-token")
         self.assertEqual(_extract_bearer_token("bearer admin-token"), "admin-token")
@@ -234,10 +264,6 @@ class GatewayApiContractTests(unittest.TestCase):
                     os.environ["KAI_SECURITY_DB_PATH"] = old_value
 
     def test_build_safe_provider_messages_uses_effective_prompt_for_mask(self) -> None:
-        messages = [
-            {"role": "user", "content": "original"},
-            {"role": "assistant", "content": "ignored"},
-        ]
         safe_messages = _build_safe_provider_messages(
             action="mask",
             canonical_prompt="user: original",
@@ -1305,6 +1331,113 @@ class GatewayApiContractTests(unittest.TestCase):
                 for event in events
             )
         )
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_resolve_approval_executes_stored_chat_completion_context(self) -> None:
+        self._set_env("KAI_SECURITY_ADMIN_TOKENS", "admin-token=manager-1:admin")
+        self._set_env("KAI_SECURITY_APPROVER_TOKENS", "approver-token=approver-1:security_manager")
+        service = GatewayService()
+        client = TestClient(app)
+        adapter = Mock()
+        adapter.complete.return_value = {
+            "id": "adapter-approval-1",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "approved provider response"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+
+        with (
+            patch("apps.gateway_api.main.gateway", service),
+            patch("apps.gateway_api.main.resolve_provider_adapter", return_value=adapter),
+        ):
+            chat_response = client.post(
+                "/v1/chat/completions",
+                headers=self._client_headers(),
+                json={
+                    "model": "gateway-test",
+                    "data_grade": "restricted",
+                    "model_zone": "external",
+                    "temperature": 0.1,
+                    "messages": [{"role": "user", "content": "normal business review"}],
+                },
+            )
+            approval_id = chat_response.json()["gateway_security"]["approval_id"]
+            resolve_response = client.post(
+                f"/v1/approvals/{approval_id}/resolve",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"approval_token": "approver-token", "approved": True},
+            )
+
+        self.assertEqual(chat_response.status_code, 200)
+        self.assertEqual(chat_response.json()["gateway_security"]["action"], "require_approval")
+        self.assertEqual(resolve_response.status_code, 200)
+        resolved = resolve_response.json()
+        self.assertEqual(resolved["status"], "approved")
+        self.assertIn("completion", resolved)
+        self.assertEqual(
+            resolved["completion"]["choices"][0]["message"]["content"],
+            "approved provider response",
+        )
+        called_payload = adapter.complete.call_args.kwargs
+        self.assertEqual(called_payload["model"], "gateway-test")
+        self.assertEqual(called_payload["provider_options"], {"temperature": 0.1})
+        self.assertTrue(called_payload["gateway_security"]["approved_execution"])
+        event_types = [
+            event.event_type
+            for event in service.evidence_store.list_events(
+                request_id=chat_response.json()["gateway_security"]["request_id"]
+            )
+        ]
+        self.assertIn("approval_resolved", event_types)
+        self.assertIn("response_analyzed", event_types)
+        self.assertIn("approval_executed", event_types)
+
+    @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
+    def test_rejected_approval_does_not_execute_stored_context(self) -> None:
+        self._set_env("KAI_SECURITY_ADMIN_TOKENS", "admin-token=manager-1:admin")
+        self._set_env("KAI_SECURITY_APPROVER_TOKENS", "approver-token=approver-1:security_manager")
+        service = GatewayService()
+        client = TestClient(app)
+        adapter = Mock()
+
+        with (
+            patch("apps.gateway_api.main.gateway", service),
+            patch("apps.gateway_api.main.resolve_provider_adapter", return_value=adapter),
+        ):
+            chat_response = client.post(
+                "/v1/chat/completions",
+                headers=self._client_headers(),
+                json={
+                    "model": "gateway-test",
+                    "data_grade": "restricted",
+                    "model_zone": "external",
+                    "messages": [{"role": "user", "content": "normal business review"}],
+                },
+            )
+            approval_id = chat_response.json()["gateway_security"]["approval_id"]
+            resolve_response = client.post(
+                f"/v1/approvals/{approval_id}/resolve",
+                headers={"Authorization": "Bearer admin-token"},
+                json={"approval_token": "approver-token", "approved": False},
+            )
+
+        self.assertEqual(chat_response.status_code, 200)
+        self.assertEqual(resolve_response.status_code, 200)
+        self.assertEqual(resolve_response.json()["status"], "rejected")
+        self.assertNotIn("completion", resolve_response.json())
+        adapter.complete.assert_not_called()
+        event_types = [
+            event.event_type
+            for event in service.evidence_store.list_events(
+                request_id=chat_response.json()["gateway_security"]["request_id"]
+            )
+        ]
+        self.assertNotIn("approval_executed", event_types)
 
     @unittest.skipIf(TestClient is None or app is None, "FastAPI test client is unavailable")
     def test_resolve_approval_double_resolve_is_conflict(self) -> None:
